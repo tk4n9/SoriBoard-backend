@@ -1,6 +1,15 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import *
+from .stats import (
+    StatsSummaryView,
+    TopComposersStatsView,
+    TopWorksStatsView,
+    TopConductorsStatsView,
+    TopOrchestrasStatsView,
+    PlaysOverTimeStatsView,
+    EraDistributionStatsView,
+)
 
 router = DefaultRouter()
 router.register(r"user", UserViewSet, basename="user")
@@ -40,4 +49,16 @@ urlpatterns = [
         CheckDuplicateMusicView.as_view(),
         name="check-duplicate",
     ),
+    # 통계
+    path("stats/summary/", StatsSummaryView.as_view(), name="stats-summary"),
+    path("stats/composers/", TopComposersStatsView.as_view(), name="stats-composers"),
+    path("stats/works/", TopWorksStatsView.as_view(), name="stats-works"),
+    path(
+        "stats/conductors/", TopConductorsStatsView.as_view(), name="stats-conductors"
+    ),
+    path(
+        "stats/orchestras/", TopOrchestrasStatsView.as_view(), name="stats-orchestras"
+    ),
+    path("stats/timeline/", PlaysOverTimeStatsView.as_view(), name="stats-timeline"),
+    path("stats/eras/", EraDistributionStatsView.as_view(), name="stats-eras"),
 ]
