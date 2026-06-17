@@ -74,21 +74,32 @@ def era_counts(qs):
 # 삼고, 성악(가곡/오페라/합창/종교음악)은 연주자 역할로 먼저 걸러낸다.
 GENRE_ORDER = ["교향곡", "협주곡", "관현악곡", "실내악곡", "독주곡", "기타"]
 
-# 연주자 instrument 표기에 들어가면 성악으로 보는 역할들.
-_VOCAL_ROLE_TERMS = (
-    "성악",
-    "소프라노",
-    "메조",
-    "알토",
-    "콘트랄토",
-    "테너",
-    "바리톤",
-    "베이스",  # 베이스바리톤 포함
-    "카운터테너",
-    "보컬",
-    "낭독",
-    "내레이션",
-    "합창",
+# 성악으로 보는 연주자 역할(instrument 칸 값). 정확히 일치할 때만 성악으로 본다.
+# 부분 문자열로 보면 "콘트라베이스"가 "베이스"에, "알토 리코더"가 "알토"에 걸려
+# 기악이 성악으로 오분류되므로 집합 일치를 쓴다.
+_VOCAL_ROLES = frozenset(
+    {
+        "성악",
+        "성악가",
+        "보컬",
+        "소프라노",
+        "메조소프라노",
+        "메조 소프라노",
+        "메조",
+        "알토",
+        "콘트랄토",
+        "테너",
+        "카운터테너",
+        "카운터 테너",
+        "바리톤",
+        "베이스바리톤",
+        "베이스 바리톤",
+        "베이스",
+        "낭독",
+        "내레이션",
+        "합창",
+        "합창단",
+    }
 )
 # 제목에 들어가면 성악/극/종교음악으로 보는 키워드.
 _VOCAL_TITLE_TERMS = (
@@ -113,8 +124,7 @@ _VOCAL_TITLE_TERMS = (
 
 
 def _is_vocal_role(instrument):
-    instrument = instrument or ""
-    return any(term in instrument for term in _VOCAL_ROLE_TERMS)
+    return (instrument or "").strip() in _VOCAL_ROLES
 
 
 def genre_for(title, has_orchestra, instruments):
