@@ -13,6 +13,8 @@ play history = TimeMusic ⨝ TimeInfo. 모든 엔드포인트는 공통 필터(`
 """
 
 import datetime
+import math
+from collections import defaultdict
 
 from django.db.models import Count, Max, Min, Q
 from django.db.models.functions import TruncMonth, TruncWeek
@@ -158,6 +160,36 @@ def genre_for(title, has_orchestra, instruments):
 
     # 7) 기타: 위에 해당 없음(편성 정보 부족 포함).
     return "기타"
+
+
+# ---------------------------------------------------------------------------
+# 다양성 지표 (엔트로피/고른정도/심슨)
+# ---------------------------------------------------------------------------
+def diversity_metrics(counts, n_possible):
+    """버킷별 선곡수 → 다양성 지표.
+
+    - entropy: 섀넌 엔트로피 H = -Σ p·ln(p) (nats).
+    - evenness: H 를 ln(n_possible) 로 정규화한 [0,1] 값. 가능한 모든 버킷을
+      고르게 쓸수록 1 에 가깝다(다양성 목표 지표).
+    - simpson: 1 - Σ p² ("무작위 두 곡이 서로 다른 버킷일 확률").
+    """
+    vals = [v for v in counts.values() if v > 0]
+    n = sum(vals)
+    if n == 0:
+        return {"entropy": 0.0, "evenness": 0.0, "simpson": 0.0}
+    entropy = 0.0
+    simpson_sum = 0.0
+    for v in vals:
+        p = v / n
+        entropy -= p * math.log(p)
+        simpson_sum += p * p
+    max_entropy = math.log(n_possible) if n_possible > 1 else 0.0
+    evenness = entropy / max_entropy if max_entropy > 0 else 0.0
+    return {
+        "entropy": round(entropy, 4),
+        "evenness": round(evenness, 4),
+        "simpson": round(1 - simpson_sum, 4),
+    }
 
 
 def genre_counts(qs):
@@ -519,5 +551,133 @@ class GenreDistributionStatsView(APIView):
                 "labels": labels,
                 "values": values,
                 "items": items,
+            }
+        )
+
+
+# 다양성 정규화에 쓰는 "가능한 버킷 수": 시대는 미상 제외 5개, 장르는 6개.
+_ERA_POSSIBLE = len(ERA_BUCKETS)
+_GENRE_POSSIBLE = len(GENRE_ORDER)
+
+
+class DiversityStatsView(APIView):
+    """선곡 다양성 지표.
+
+    한 번의 순회로 시대·장르를 분류해 (1) 기간 전체 요약(분포 + 엔트로피/
+    고른정도/심슨), (2) 기간 버킷별(?bucket=week|month, 기본 week) 시계열
+    (선곡수·고유 곡수·시대 고른정도·장르 고른정도)을 함께 돌려준다.
+
+    주간은 표본이 적어 고른정도가 출렁이므로, 프런트는 보통 선곡수는 주간으로,
+    다양성은 월간/학기 요약으로 함께 보여준다.
+    """
+
+    def get(self, request):
+        qs, applied = base_queryset(request)
+        bucket = request.query_params.get("bucket", "week")
+        if bucket not in ("week", "month"):
+            bucket = "week"
+
+        plays = qs.select_related(
+            "time", "music", "music__composer", "orchestra"
+        ).prefetch_related("players")
+
+        era_all = defaultdict(int)
+        genre_all = defaultdict(int)
+        works = set()
+        composers = set()
+        per_era = defaultdict(lambda: defaultdict(int))
+        per_genre = defaultdict(lambda: defaultdict(int))
+        per_plays = defaultdict(int)
+        per_works = defaultdict(set)
+
+        seen = set()
+        total = 0
+        for tm in plays:
+            if tm.id in seen:
+                continue
+            seen.add(tm.id)
+            total += 1
+
+            date = tm.time.date
+            if bucket == "week":
+                start = date - datetime.timedelta(days=date.weekday())
+                key = start.strftime("%Y-%m-%d")
+            else:
+                key = date.strftime("%Y-%m")
+
+            composer = (
+                tm.music.composer if (tm.music_id and tm.music.composer_id) else None
+            )
+            era = (
+                era_for(composer.birth_year, composer.era_override)
+                if composer
+                else "미상"
+            )
+
+            instruments = [p.instrument for p in tm.players.all()]
+            title = tm.music.title if tm.music_id else ""
+            genre = genre_for(title, tm.orchestra_id is not None, instruments)
+
+            era_all[era] += 1
+            genre_all[genre] += 1
+            per_era[key][era] += 1
+            per_genre[key][genre] += 1
+            per_plays[key] += 1
+            if tm.music_id:
+                works.add(tm.music_id)
+                per_works[key].add(tm.music_id)
+            if composer:
+                composers.add(composer.id)
+
+        # 기간 전체 요약 분포.
+        era_known = {e: c for e, c in era_all.items() if e != "미상"}
+        era_labels = [l for l in ERA_ORDER if l != "미상" and era_all.get(l)]
+        era_values = [era_all[l] for l in era_labels]
+        genre_labels = [l for l in GENRE_ORDER if genre_all.get(l)]
+        genre_values = [genre_all[l] for l in genre_labels]
+        unknown = era_all.get("미상", 0)
+
+        summary = {
+            "distinct_works": len(works),
+            "distinct_composers": len(composers),
+            "era": {
+                "labels": era_labels,
+                "values": era_values,
+                "unknown_share": round(unknown / total, 4) if total else 0,
+                **diversity_metrics(era_known, _ERA_POSSIBLE),
+            },
+            "genre": {
+                "labels": genre_labels,
+                "values": genre_values,
+                **diversity_metrics(genre_all, _GENRE_POSSIBLE),
+            },
+        }
+
+        # 버킷별 시계열.
+        labels = sorted(per_plays.keys())
+        timeline = {
+            "bucket": bucket,
+            "labels": labels,
+            "plays": [per_plays[k] for k in labels],
+            "distinct_works": [len(per_works[k]) for k in labels],
+            "era_evenness": [
+                diversity_metrics(
+                    {e: c for e, c in per_era[k].items() if e != "미상"},
+                    _ERA_POSSIBLE,
+                )["evenness"]
+                for k in labels
+            ],
+            "genre_evenness": [
+                diversity_metrics(per_genre[k], _GENRE_POSSIBLE)["evenness"]
+                for k in labels
+            ],
+        }
+
+        return Response(
+            {
+                "filters": {**applied, "bucket": bucket},
+                "total_plays": total,
+                "summary": summary,
+                "timeline": timeline,
             }
         )
