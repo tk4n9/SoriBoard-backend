@@ -163,7 +163,7 @@ def genre_for(title, has_orchestra, instruments):
 
 
 # ---------------------------------------------------------------------------
-# 다양성 지표 (엔트로피/고른정도/심슨)
+# 다양성 지표 (엔트로피/고른정도)
 # ---------------------------------------------------------------------------
 def diversity_metrics(counts, n_possible):
     """버킷별 선곡수 → 다양성 지표.
@@ -171,24 +171,20 @@ def diversity_metrics(counts, n_possible):
     - entropy: 섀넌 엔트로피 H = -Σ p·ln(p) (nats).
     - evenness: H 를 ln(n_possible) 로 정규화한 [0,1] 값. 가능한 모든 버킷을
       고르게 쓸수록 1 에 가깝다(다양성 목표 지표).
-    - simpson: 1 - Σ p² ("무작위 두 곡이 서로 다른 버킷일 확률").
     """
     vals = [v for v in counts.values() if v > 0]
     n = sum(vals)
     if n == 0:
-        return {"entropy": 0.0, "evenness": 0.0, "simpson": 0.0}
+        return {"entropy": 0.0, "evenness": 0.0}
     entropy = 0.0
-    simpson_sum = 0.0
     for v in vals:
         p = v / n
         entropy -= p * math.log(p)
-        simpson_sum += p * p
     max_entropy = math.log(n_possible) if n_possible > 1 else 0.0
     evenness = entropy / max_entropy if max_entropy > 0 else 0.0
     return {
         "entropy": round(entropy, 4),
         "evenness": round(evenness, 4),
-        "simpson": round(1 - simpson_sum, 4),
     }
 
 
@@ -602,7 +598,7 @@ class DiversityStatsView(APIView):
     """선곡 다양성 지표.
 
     한 번의 순회로 시대·장르를 분류해 (1) 기간 전체 요약(분포 + 엔트로피/
-    고른정도/심슨), (2) 기간 버킷별(?bucket=week|month, 기본 week) 시계열
+    고른정도), (2) 기간 버킷별(?bucket=week|month, 기본 week) 시계열
     (선곡수·고유 곡수·시대 고른정도·장르 고른정도)을 함께 돌려준다.
 
     주간은 표본이 적어 고른정도가 출렁이므로, 프런트는 보통 선곡수는 주간으로,
