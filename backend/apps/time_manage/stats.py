@@ -440,6 +440,44 @@ class TopOrchestrasStatsView(APIView):
         )
 
 
+class TopSoloistsStatsView(APIView):
+    """많이 등장한 연주자(독주자·협연자 등). players(M2M) 기준 집계.
+
+    악기에 상관없이 모든 연주자를 한데 모아 등장 선곡 수로 순위를 매긴다.
+    라벨은 "이름 (악기)" 형태. M2M 조인으로 한 곡이 부풀지 않도록 곡은
+    distinct 로 센다.
+    """
+
+    def get(self, request):
+        qs, applied = base_queryset(request)
+        total = qs.count()
+        rows = (
+            qs.exclude(players__isnull=True)
+            .values("players__id", "players__name", "players__instrument")
+            .annotate(count=Count("id", distinct=True))
+            .order_by("-count")[: _limit(request)]
+        )
+        labels, values, items = [], [], []
+        for row in rows:
+            name = row["players__name"]
+            instrument = row["players__instrument"]
+            label = f"{name} ({instrument})" if instrument else name
+            labels.append(label)
+            values.append(row["count"])
+            items.append(
+                {"id": row["players__id"], "name": label, "count": row["count"]}
+            )
+        return Response(
+            {
+                "filters": applied,
+                "total_plays": total,
+                "labels": labels,
+                "values": values,
+                "items": items,
+            }
+        )
+
+
 class PlaysOverTimeStatsView(APIView):
     """기간별 선곡 추이. ?bucket=week|month|semester (기본 month)."""
 

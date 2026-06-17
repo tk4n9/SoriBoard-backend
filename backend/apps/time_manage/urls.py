@@ -7,6 +7,7 @@ from .stats import (
     TopWorksStatsView,
     TopConductorsStatsView,
     TopOrchestrasStatsView,
+    TopSoloistsStatsView,
     PlaysOverTimeStatsView,
     EraDistributionStatsView,
     GenreDistributionStatsView,
@@ -55,6 +56,7 @@ urlpatterns = [
     path("stats/summary/", StatsSummaryView.as_view(), name="stats-summary"),
     path("stats/composers/", TopComposersStatsView.as_view(), name="stats-composers"),
     path("stats/works/", TopWorksStatsView.as_view(), name="stats-works"),
+    path("stats/soloists/", TopSoloistsStatsView.as_view(), name="stats-soloists"),
     path(
         "stats/conductors/", TopConductorsStatsView.as_view(), name="stats-conductors"
     ),
