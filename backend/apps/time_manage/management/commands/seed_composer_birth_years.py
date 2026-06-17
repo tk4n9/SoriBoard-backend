@@ -1,125 +1,37 @@
-"""상위 선곡 작곡가의 출생년도를 시드한다(시대 분포 차트용).
+"""작곡가 출생년도/시대 보정을 시드한다(시대 분포·다양성 차트용).
 
-작곡가 이름은 백엔드 Composer.name 의 짧은 표기를 키로 한다. 시드는 부분 매칭
-(icontains)로 적용되어 "바흐", "요한 제바스티안 바흐" 등 표기 차이를 흡수한다.
-이미 birth_year 가 채워진 작곡가는 --force 없이는 건드리지 않는다.
+출생년도는 CD_LIST 아카이브에서 추출한 표준 표기를 바탕으로 생성된
+``apps/time_manage/data/composer_birth_years.json`` 에서 읽는다(작곡가 본인의
+생몰년 표기 `성, 이름 (1685-1750)` 에서 파싱). 키는 한글 성(姓)이며, 같은 성을
+가진 인물이 여럿이면 아카이브에서 가장 많이 기록된(=합창단이 가장 많이 트는)
+인물의 출생년도를 채택한다.
+
+매칭은 백엔드 Composer.name 을 토큰으로 나눠 성(姓)을 **정확히** 대조한다
+("요한 제바스티안 바흐"→"바흐", "바흐"→"바흐"). 부분 문자열 매칭은 "라"·"르"
+같은 짧은 성 키가 무관한 이름까지 오염시키므로 쓰지 않는다. 이미 birth_year 가
+채워진 작곡가는 --force 없이는 건드리지 않는다.
+
+데이터 파일을 새로 만들려면 아카이브(엑셀) 원본에서 재생성한다. 손으로 고치지 말 것.
 
 용례:
     python manage.py seed_composer_birth_years
     python manage.py seed_composer_birth_years --force
 """
 
-from django.core.management.base import BaseCommand
+import json
+from pathlib import Path
+
+from django.core.management.base import BaseCommand, CommandError
 
 from apps.time_manage.models import Composer
 
-# 짧은 한글 표기 → 출생년도. 클래식 선곡 빈도 상위권 위주로 큐레이션.
-BIRTH_YEARS = {
-    # 르네상스
-    "팔레스트리나": 1525,
-    "가브리엘리": 1557,
-    "몬테베르디": 1567,
-    # 바로크
-    "비발디": 1678,
-    "텔레만": 1681,
-    "바흐": 1685,
-    "헨델": 1685,
-    "스카를라티": 1685,
-    "퍼셀": 1659,
-    "코렐리": 1653,
-    "라모": 1683,
-    "쿠프랭": 1668,
-    "알비노니": 1671,
-    "파헬벨": 1653,
-    # 고전
-    "하이든": 1732,
-    "모차르트": 1756,
-    "베토벤": 1770,  # 경계값 — era_override 로 낭만 처리
-    "글루크": 1714,
-    "보케리니": 1743,
-    "살리에리": 1750,
-    "클레멘티": 1752,
-    # 낭만
-    "슈베르트": 1797,
-    "베를리오즈": 1803,
-    "멘델스존": 1809,
-    "쇼팽": 1810,
-    "슈만": 1810,
-    "리스트": 1811,
-    "바그너": 1813,
-    "베르디": 1813,
-    "브루크너": 1824,
-    "스메타나": 1824,
-    "브람스": 1833,
-    "보로딘": 1833,
-    "생상스": 1835,
-    "비제": 1838,
-    "무소르그스키": 1839,
-    "차이콥스키": 1840,
-    "드보르자크": 1841,
-    "드보르작": 1841,
-    "그리그": 1843,
-    "림스키코르사코프": 1844,
-    "포레": 1845,
-    "엘가": 1857,
-    "파가니니": 1782,
-    "로시니": 1792,
-    "도니체티": 1797,
-    "프랑크": 1822,
-    # 후기낭만/근대 (1860–1909)
-    "말러": 1860,
-    "볼프": 1860,
-    "드뷔시": 1862,
-    "리하르트 슈트라우스": 1864,
-    "슈트라우스": 1864,
-    "시벨리우스": 1865,
-    "닐센": 1865,
-    "사티": 1866,
-    "라흐마니노프": 1873,
-    "라벨": 1875,
-    "쇤베르크": 1874,
-    "아이브스": 1874,
-    "홀스트": 1874,
-    "바르토크": 1881,
-    "스트라빈스키": 1882,
-    "코다이": 1882,
-    "베베른": 1883,
-    "베르크": 1885,
-    "프로코피예프": 1891,
-    "프로코피에프": 1891,
-    "오네게르": 1892,
-    "미요": 1892,
-    "힌데미트": 1895,
-    "거슈윈": 1898,
-    "거슈인": 1898,
-    "풀랑크": 1899,
-    # 현대 (1910–)
-    "바버": 1910,
-    "쇼스타코비치": 1906,  # 1910 미만 → 근대로 분류됨
-    "메시앙": 1908,
-    "브리튼": 1913,
-    "번스타인": 1918,
-    "리게티": 1923,
-    "불레즈": 1925,
-    "베리오": 1925,
-    "쿠르탁": 1926,
-    "슈톡하우젠": 1928,
-    "펜데레츠키": 1933,
-    "라이히": 1936,
-    "글래스": 1937,
-    "페르트": 1935,
-    "아르보 페르트": 1935,
-    "윤이상": 1917,
-}
-
-# 출생년도 휴리스틱을 덮어쓸 작곡가(경계값 보정).
-ERA_OVERRIDES = {
-    "베토벤": "낭만",  # 1770 — 관례상 낭만으로 분류
-}
+DATA_FILE = (
+    Path(__file__).resolve().parents[2] / "data" / "composer_birth_years.json"
+)
 
 
 class Command(BaseCommand):
-    help = "상위 선곡 작곡가의 출생년도/시대 보정을 시드한다."
+    help = "아카이브에서 추출한 작곡가 출생년도/시대 보정을 시드한다."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -130,30 +42,56 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         force = options["force"]
+
+        if not DATA_FILE.exists():
+            raise CommandError(f"데이터 파일을 찾을 수 없습니다: {DATA_FILE}")
+        payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        birth_years = payload.get("birth_years", {})
+        era_overrides = payload.get("era_overrides", {})
+
         updated = 0
         matched_names = set()
 
-        for short_name, year in BIRTH_YEARS.items():
-            override = ERA_OVERRIDES.get(short_name)
-            composers = Composer.objects.filter(name__icontains=short_name)
-            for composer in composers:
-                changed = False
-                if force or composer.birth_year is None:
-                    composer.birth_year = year
-                    changed = True
-                if override and (force or not composer.era_override):
-                    composer.era_override = override
-                    changed = True
-                if changed:
-                    composer.save(update_fields=["birth_year", "era_override"])
-                    updated += 1
-                    matched_names.add(composer.name)
+        for composer in Composer.objects.all():
+            key = self._match_key(composer.name, birth_years)
+            if key is None:
+                continue
+            year = birth_years[key]
+            override = era_overrides.get(key)
+
+            changed = False
+            if force or composer.birth_year is None:
+                composer.birth_year = year
+                changed = True
+            if override and (force or not composer.era_override):
+                composer.era_override = override
+                changed = True
+            if changed:
+                composer.save(update_fields=["birth_year", "era_override"])
+                updated += 1
+                matched_names.add(composer.name)
+
+    @staticmethod
+    def _match_key(name, birth_years):
+        """백엔드 작곡가명 → birth_years 의 키(성). 정확 일치만 허용.
+
+        후보 순서: 이름 전체 → 마지막 토큰(표시 순서의 성) → 첫 토큰.
+        """
+        name = (name or "").strip()
+        if not name:
+            return None
+        tokens = name.split()
+        for cand in (name, tokens[-1], tokens[0]):
+            if cand in birth_years:
+                return cand
+        return None
 
         total = Composer.objects.count()
         seeded = Composer.objects.exclude(birth_year__isnull=True).count()
         self.stdout.write(
             self.style.SUCCESS(
-                f"작곡가 {updated}명 업데이트. "
-                f"전체 {total}명 중 {seeded}명 출생년도 보유."
+                f"작곡가 {updated}건 업데이트(고유 {len(matched_names)}명). "
+                f"전체 {total}명 중 {seeded}명 출생년도 보유. "
+                f"(출처 키 {len(birth_years)}개)"
             )
         )
