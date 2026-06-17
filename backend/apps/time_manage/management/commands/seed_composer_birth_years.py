@@ -25,9 +25,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.time_manage.models import Composer
 
-DATA_FILE = (
-    Path(__file__).resolve().parents[2] / "data" / "composer_birth_years.json"
-)
+DATA_FILE = Path(__file__).resolve().parents[2] / "data" / "composer_birth_years.json"
 
 
 class Command(BaseCommand):
