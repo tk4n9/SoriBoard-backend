@@ -9,6 +9,7 @@ from .stats import (
     TopOrchestrasStatsView,
     PlaysOverTimeStatsView,
     EraDistributionStatsView,
+    GenreDistributionStatsView,
 )
 
 router = DefaultRouter()
@@ -61,4 +62,5 @@ urlpatterns = [
     ),
     path("stats/timeline/", PlaysOverTimeStatsView.as_view(), name="stats-timeline"),
     path("stats/eras/", EraDistributionStatsView.as_view(), name="stats-eras"),
+    path("stats/genres/", GenreDistributionStatsView.as_view(), name="stats-genres"),
 ]

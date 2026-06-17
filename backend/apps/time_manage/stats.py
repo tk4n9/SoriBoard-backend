@@ -48,6 +48,138 @@ def era_for(birth_year, override=None):
     return "미상"
 
 
+def era_counts(qs):
+    """필터된 TimeMusic 쿼리셋 → {시대: 선곡수}. 작곡가 없는 행은 '미상'."""
+    rows = qs.values(
+        "music__composer__birth_year",
+        "music__composer__era_override",
+    ).annotate(count=Count("id"))
+    buckets = {label: 0 for label in ERA_ORDER}
+    for row in rows:
+        era = era_for(
+            row["music__composer__birth_year"],
+            row["music__composer__era_override"],
+        )
+        buckets[era] = buckets.get(era, 0) + row["count"]
+    return buckets
+
+
+# ---------------------------------------------------------------------------
+# 장르 구분 (제목 + 편성 휴리스틱)
+# ---------------------------------------------------------------------------
+# 데이터는 정확하지 않으므로 "대부분 맞는" 분류가 목표다. 위에서부터 처음
+# 매칭되는 장르로 분류한다. 지휘자 표기는 누락이 잦아 오케스트라 유무를 기준으로
+# 삼고, 성악(가곡/오페라/합창/종교음악)은 연주자 역할로 먼저 걸러낸다.
+GENRE_ORDER = ["교향곡", "협주곡", "관현악곡", "실내악곡", "독주곡", "기타"]
+
+# 연주자 instrument 표기에 들어가면 성악으로 보는 역할들.
+_VOCAL_ROLE_TERMS = (
+    "성악",
+    "소프라노",
+    "메조",
+    "알토",
+    "콘트랄토",
+    "테너",
+    "바리톤",
+    "베이스",  # 베이스바리톤 포함
+    "카운터테너",
+    "보컬",
+    "낭독",
+    "내레이션",
+    "합창",
+)
+# 제목에 들어가면 성악/극/종교음악으로 보는 키워드.
+_VOCAL_TITLE_TERMS = (
+    "오페라",
+    "미사",
+    "레퀴엠",
+    "오라토리오",
+    "칸타타",
+    "수난곡",
+    "가곡",
+    "모테트",
+    "마드리갈",
+    "합창",
+    "아리아",
+    "성가",
+    "찬트",
+    "떼데움",
+    "테데움",
+    "마니피카트",
+    "스타바트",
+)
+
+
+def _is_vocal_role(instrument):
+    instrument = instrument or ""
+    return any(term in instrument for term in _VOCAL_ROLE_TERMS)
+
+
+def genre_for(title, has_orchestra, instruments):
+    """제목·오케스트라 유무·연주자 instrument 목록 → 장르 라벨.
+
+    instruments 는 성악을 포함한 연주자 역할 문자열 리스트(예: ["피아노"]).
+    """
+    title = title or ""
+    instruments = instruments or []
+
+    # 1) 성악/극/종교음악: 성악 연주자가 있거나 제목 키워드가 잡히면.
+    if any(_is_vocal_role(i) for i in instruments) or any(
+        term in title for term in _VOCAL_TITLE_TERMS
+    ):
+        return "기타"
+
+    # 여기부터는 기악으로 본다.
+    n_players = len(instruments)
+
+    # 2) 교향곡: 제목에 "교향곡".
+    if "교향곡" in title:
+        return "교향곡"
+
+    # 3) 협주곡: 제목이 협주곡/concerto 거나(단, "관현악을 위한 협주곡" 제외),
+    #    오케스트라 + 협연자(1명 이상).
+    is_concerto_title = (
+        "협주곡" in title or "concerto" in title.lower()
+    ) and "관현악" not in title
+    if is_concerto_title or (has_orchestra and n_players >= 1):
+        return "협주곡"
+
+    # 4) 관현악곡: 오케스트라 편성(교향곡·협주곡이 아닌).
+    if has_orchestra:
+        return "관현악곡"
+
+    # 5) 독주곡: 연주자 1명.
+    if n_players == 1:
+        return "독주곡"
+
+    # 6) 실내악곡: 연주자 2~8명.
+    if 2 <= n_players <= 8:
+        return "실내악곡"
+
+    # 7) 기타: 위에 해당 없음(편성 정보 부족 포함).
+    return "기타"
+
+
+def genre_counts(qs):
+    """필터된 TimeMusic 쿼리셋 → {장르: 선곡수}.
+
+    players(M2M) 조인이 행을 부풀리지 않도록 prefetch 후 파이썬에서 집계하며,
+    필터 조인으로 생길 수 있는 중복 행은 id 로 1회만 센다.
+    """
+    buckets = {label: 0 for label in GENRE_ORDER}
+    seen = set()
+    plays = qs.select_related("music", "orchestra").prefetch_related("players")
+    for tm in plays:
+        if tm.id in seen:
+            continue
+        seen.add(tm.id)
+        instruments = [p.instrument for p in tm.players.all()]
+        title = tm.music.title if tm.music_id else ""
+        genre = genre_for(title, tm.orchestra_id is not None, instruments)
+        buckets[genre] += 1
+    return buckets
+
+
 # ---------------------------------------------------------------------------
 # 공통 필터
 # ---------------------------------------------------------------------------
@@ -337,23 +469,7 @@ class EraDistributionStatsView(APIView):
     def get(self, request):
         qs, applied = base_queryset(request)
         total = qs.count()
-
-        rows = (
-            qs.exclude(music__composer__isnull=True)
-            .values(
-                "music__composer__birth_year",
-                "music__composer__era_override",
-            )
-            .annotate(count=Count("id"))
-        )
-
-        buckets = {label: 0 for label in ERA_ORDER}
-        for row in rows:
-            era = era_for(
-                row["music__composer__birth_year"],
-                row["music__composer__era_override"],
-            )
-            buckets[era] = buckets.get(era, 0) + row["count"]
+        buckets = era_counts(qs)
 
         labels, values, items = [], [], []
         for label in ERA_ORDER:
@@ -375,5 +491,33 @@ class EraDistributionStatsView(APIView):
                 "values": values,
                 "items": items,
                 "unknown_share": unknown_share,
+            }
+        )
+
+
+class GenreDistributionStatsView(APIView):
+    """장르(교향곡/협주곡/관현악곡/실내악곡/독주곡/기타) 분포. 편성 휴리스틱 사용."""
+
+    def get(self, request):
+        qs, applied = base_queryset(request)
+        total = qs.count()
+        buckets = genre_counts(qs)
+
+        labels, values, items = [], [], []
+        for label in GENRE_ORDER:
+            count = buckets.get(label, 0)
+            if count == 0:
+                continue
+            labels.append(label)
+            values.append(count)
+            items.append({"id": label, "name": label, "count": count})
+
+        return Response(
+            {
+                "filters": applied,
+                "total_plays": total,
+                "labels": labels,
+                "values": values,
+                "items": items,
             }
         )
