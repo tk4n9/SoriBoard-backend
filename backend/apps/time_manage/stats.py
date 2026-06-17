@@ -25,13 +25,13 @@ from .models import Composer, Semester, TimeMusic
 # 시대 구분 (작곡가 출생년도 기준 휴리스틱 + era_override 수동 보정)
 # ---------------------------------------------------------------------------
 # (라벨, 상한) — birth_year < 상한 이면 해당 시대. 위에서부터 처음 매칭되는 구간.
+# 5분류로 단순화(중세=르네상스 포함, 근현대=20세기 이후). 경계 사례는 era_override 로 보정.
 ERA_BUCKETS = [
-    ("르네상스", 1600),
+    ("중세", 1600),  # 르네상스 이전·다성음악 포함
     ("바로크", 1710),
     ("고전", 1770),
-    ("낭만", 1860),
-    ("후기낭만/근대", 1910),
-    ("현대", None),  # 1910 이상
+    ("낭만", 1880),
+    ("근현대", None),  # 1880 이상
 ]
 ERA_ORDER = [label for label, _ in ERA_BUCKETS] + ["미상"]
 
@@ -332,7 +332,7 @@ class PlaysOverTimeStatsView(APIView):
 
 
 class EraDistributionStatsView(APIView):
-    """시대(르네상스/바로크/...) 분포. 작곡가 출생년도 휴리스틱 사용."""
+    """시대(중세/바로크/고전/낭만/근현대) 분포. 작곡가 출생년도 휴리스틱 사용."""
 
     def get(self, request):
         qs, applied = base_queryset(request)
