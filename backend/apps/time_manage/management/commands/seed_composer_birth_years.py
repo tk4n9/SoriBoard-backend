@@ -69,6 +69,16 @@ class Command(BaseCommand):
                 updated += 1
                 matched_names.add(composer.name)
 
+        total = Composer.objects.count()
+        seeded = Composer.objects.exclude(birth_year__isnull=True).count()
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"작곡가 {updated}건 업데이트(고유 {len(matched_names)}명). "
+                f"전체 {total}명 중 {seeded}명 출생년도 보유. "
+                f"(출처 키 {len(birth_years)}개)"
+            )
+        )
+
     @staticmethod
     def _match_key(name, birth_years):
         """백엔드 작곡가명 → birth_years 의 키(성). 정확 일치만 허용.
@@ -83,13 +93,3 @@ class Command(BaseCommand):
             if cand in birth_years:
                 return cand
         return None
-
-        total = Composer.objects.count()
-        seeded = Composer.objects.exclude(birth_year__isnull=True).count()
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"작곡가 {updated}건 업데이트(고유 {len(matched_names)}명). "
-                f"전체 {total}명 중 {seeded}명 출생년도 보유. "
-                f"(출처 키 {len(birth_years)}개)"
-            )
-        )
