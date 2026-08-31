@@ -242,6 +242,12 @@ class MusicDetail(models.Model):
 # 작곡가 정보
 class Composer(models.Model):
     name = models.CharField(max_length=50)
+    birth_year = models.IntegerField(
+        null=True, blank=True, default=None
+    )  # 통계 시대 분류용 출생년도 (상위 선곡 작곡가만 시드)
+    era_override = models.CharField(
+        max_length=20, null=True, blank=True, default=None
+    )  # 출생년도 휴리스틱을 덮어쓰는 수동 시대 보정
 
     class Meta:
         db_table = "composer"
