@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 import datetime
 import re
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from .models import *
 from .serializers import *
 from django.db.models import Count
@@ -310,6 +311,68 @@ class MusicByComposerViewSet(viewsets.ReadOnlyModelViewSet):
 class NewsViewSet(viewsets.ModelViewSet):
     queryset = News.objects.all()
     serializer_class = NewsSerializer
+
+
+class RecentPlaysView(APIView):
+    """Prefix matches from the last 30 Seoul calendar days, including today."""
+
+    def get(self, request):
+        composer_prefix = request.query_params.get("composer_name", "").strip()
+        title_prefix = request.query_params.get("title", "").strip().casefold()
+        if not composer_prefix:
+            return Response({"composers": [], "works": []})
+
+        today = timezone.localdate()
+        week_start = today - datetime.timedelta(days=6)
+        month_start = today - datetime.timedelta(days=29)
+        plays = (
+            TimeMusic.objects.filter(
+                music__composer__name__istartswith=composer_prefix,
+                time__date__range=(month_start, today),
+            )
+            .order_by("-time__date", "-time__time", "-order", "-id")
+            .values("music__composer__name", "music__title", "time__date")
+        )
+
+        # One query for both hints; title input must not narrow composer counts.
+        composers = {}
+        works = {}
+        for play in plays:
+            name = play["music__composer__name"]
+            title = play["music__title"]
+            date = play["time__date"]
+            composer = composers.setdefault(
+                name,
+                {
+                    "name": name,
+                    "count_1d": 0,
+                    "count_7d": 0,
+                    "count_30d": 0,
+                    "recent_titles": [],
+                },
+            )
+            composer["count_1d"] += int(date == today)
+            composer["count_7d"] += int(date >= week_start)
+            composer["count_30d"] += 1
+            if len(composer["recent_titles"]) < 3:
+                composer["recent_titles"].append(title)
+
+            if title_prefix and title.casefold().startswith(title_prefix):
+                work = works.setdefault(
+                    (name, title),
+                    {
+                        "composer_name": name,
+                        "title": title,
+                        "count_30d": 0,
+                        "last_played": date.isoformat(),
+                        "days_since_last_played": (today - date).days,
+                    },
+                )
+                work["count_30d"] += 1
+
+        return Response(
+            {"composers": list(composers.values()), "works": list(works.values())}
+        )
 
 
 class CheckDuplicateMusicView(APIView):
