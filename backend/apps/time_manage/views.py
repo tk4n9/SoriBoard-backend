@@ -1,10 +1,9 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 import datetime
 import re
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from .models import *
 from .serializers import *
 from django.db.models import Count
@@ -313,28 +312,43 @@ class NewsViewSet(viewsets.ModelViewSet):
     serializer_class = NewsSerializer
 
 
+def session_reference_date(request):
+    """Use the saved session date, never the browser or server's current date."""
+    time_id = serializers.IntegerField(min_value=1).run_validation(
+        request.query_params.get("time_id")
+    )
+    return get_object_or_404(TimeInfo.objects.only("date"), pk=time_id).date
+
+
 class RecentPlaysView(APIView):
-    """Prefix matches from the last 30 Seoul calendar days, including today."""
+    """Prefix matches from 30 calendar days ending on the selected session date."""
 
     def get(self, request):
+        reference_date = session_reference_date(request)
         composer_prefix = request.query_params.get("composer_name", "").strip()
         title_prefix = request.query_params.get("title", "").strip().casefold()
         if not composer_prefix:
-            return Response({"composers": [], "works": []})
+            return Response(
+                {
+                    "reference_date": reference_date.isoformat(),
+                    "composers": [],
+                    "works": [],
+                }
+            )
 
-        today = timezone.localdate()
-        week_start = today - datetime.timedelta(days=6)
-        month_start = today - datetime.timedelta(days=29)
+        week_start = reference_date - datetime.timedelta(days=6)
+        month_start = reference_date - datetime.timedelta(days=29)
         plays = (
             TimeMusic.objects.filter(
                 music__composer__name__istartswith=composer_prefix,
-                time__date__range=(month_start, today),
+                time__date__range=(month_start, reference_date),
             )
             .order_by("-time__date", "-time__time", "-order", "-id")
             .values("music__composer__name", "music__title", "time__date")
         )
 
-        # One query for both hints; title input must not narrow composer counts.
+        # One play-history query for both hints, after resolving the session date.
+        # Title input must not narrow composer counts.
         composers = {}
         works = {}
         for play in plays:
@@ -351,7 +365,7 @@ class RecentPlaysView(APIView):
                     "recent_titles": [],
                 },
             )
-            composer["count_1d"] += int(date == today)
+            composer["count_1d"] += int(date == reference_date)
             composer["count_7d"] += int(date >= week_start)
             composer["count_30d"] += 1
             if len(composer["recent_titles"]) < 3:
@@ -365,29 +379,37 @@ class RecentPlaysView(APIView):
                         "title": title,
                         "count_30d": 0,
                         "last_played": date.isoformat(),
-                        "days_since_last_played": (today - date).days,
+                        "days_since_last_played": (reference_date - date).days,
                     },
                 )
                 work["count_30d"] += 1
 
         return Response(
-            {"composers": list(composers.values()), "works": list(works.values())}
+            {
+                "reference_date": reference_date.isoformat(),
+                "composers": list(composers.values()),
+                "works": list(works.values()),
+            }
         )
 
 
 class CheckDuplicateMusicView(APIView):
     def get(self, request):
+        reference_date = session_reference_date(request)
         composer_name = request.query_params.get("composer_name", "")
         title = request.query_params.get("title", "")
-        days = int(request.query_params.get("days", 7))
+        days = serializers.IntegerField(min_value=1).run_validation(
+            request.query_params.get("days", 7)
+        )
 
         new_ids = extract_catalog_ids(title)
         if not new_ids:
             return Response({"duplicates": []})
 
-        cutoff = datetime.date.today() - datetime.timedelta(days=days)
+        cutoff = reference_date - datetime.timedelta(days=days - 1)
         candidates = TimeMusic.objects.filter(
-            music__composer__name=composer_name, time__date__gte=cutoff
+            music__composer__name=composer_name,
+            time__date__range=(cutoff, reference_date),
         ).select_related("music", "music__composer", "time")
 
         duplicates = []
