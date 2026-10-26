@@ -652,8 +652,21 @@ class TopSoloistsStatsView(APIView):
         )
 
 
+def _next_period(period, bucket):
+    """다음 주(월요일) 또는 다음 달(1일)."""
+    if bucket == "week":
+        return period + datetime.timedelta(days=7)
+    if period.month == 12:
+        return period.replace(year=period.year + 1, month=1)
+    return period.replace(month=period.month + 1)
+
+
 class PlaysOverTimeStatsView(APIView):
-    """기간별 선곡 추이. ?bucket=week|month|semester (기본 month)."""
+    """기간별 선곡 추이. ?bucket=week|month|semester (기본 month).
+
+    week·month 는 첫 선곡과 마지막 선곡 사이의 빈 버킷도 0 으로 준다(필터의
+    start/end 까지 늘리지는 않는다). semester 는 선곡이 있는 학기만 준다.
+    """
 
     def get(self, request):
         qs, applied = base_queryset(request)
@@ -688,15 +701,19 @@ class PlaysOverTimeStatsView(APIView):
             labels = sorted(buckets.keys())
             values = [buckets[k] for k in labels]
         else:
+            # 첫 선곡과 마지막 선곡 사이의 빈 주·월은 0 으로 채운다.
+            counts = {
+                row["period"]: row["count"] for row in rows if row["period"] is not None
+            }
             labels, values = [], []
-            for row in rows:
-                period = row["period"]
-                if period is None:
-                    continue
+            period, last = (min(counts), max(counts)) if counts else (None, None)
+            while period is not None:
                 labels.append(
                     period.strftime("%Y-%m-%d" if bucket == "week" else "%Y-%m")
                 )
-                values.append(row["count"])
+                values.append(counts.get(period, 0))
+                # 마지막 버킷 다음은 만들지 않는다(9999년 12월 다음은 없다).
+                period = _next_period(period, bucket) if period < last else None
 
         return Response(
             {

@@ -913,6 +913,81 @@ class StatsTests(StatsRequests, APITestCase):
         self.assertEqual(result["labels"], ["2024-12-30"])
         self.assertEqual(result["values"], [1])
 
+    def test_timeline_lists_empty_weeks_and_months_with_zero(self):
+        self.add_play(datetime.date(2024, 5, 15), music=self.symphony)
+
+        with self.assertNumQueries(2):
+            month = self.get("timeline")
+        self.assertEqual(month["labels"], ["2024-02", "2024-03", "2024-04", "2024-05"])
+        self.assertEqual(month["values"], [1, 5, 0, 1])
+        self.assertEqual(month["total_plays"], 7)
+
+        week = self.get("timeline", bucket="week")
+        self.assertEqual(
+            week["labels"],
+            [
+                "2024-02-26",
+                "2024-03-04",
+                "2024-03-11",
+                "2024-03-18",
+                "2024-03-25",
+                "2024-04-01",
+                "2024-04-08",
+                "2024-04-15",
+                "2024-04-22",
+                "2024-04-29",
+                "2024-05-06",
+                "2024-05-13",
+            ],
+        )
+        self.assertEqual(week["values"], [1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+
+    def test_timeline_fills_months_across_the_new_year(self):
+        for date in ("2024-11-29", "2025-02-03"):
+            self.add_play(datetime.date.fromisoformat(date), music=self.symphony)
+
+        result = self.get("timeline", start="2024-06-01")
+        self.assertEqual(result["labels"], ["2024-11", "2024-12", "2025-01", "2025-02"])
+        self.assertEqual(result["values"], [1, 0, 0, 1])
+
+        # 2024-11-29 is a Friday (week of 11/25); 2025-02-03 is a Monday.
+        result = self.get("timeline", bucket="week", start="2024-06-01")
+        self.assertEqual(len(result["labels"]), 11)
+        self.assertEqual(result["labels"][0], "2024-11-25")
+        self.assertEqual(result["labels"][4], "2024-12-23")
+        self.assertEqual(result["labels"][5], "2024-12-30")
+        self.assertEqual(result["labels"][-1], "2025-02-03")
+        self.assertEqual(result["values"], [1] + [0] * 9 + [1])
+
+    def test_timeline_fills_only_between_the_first_and_last_play(self):
+        # The filter's own start and end add no empty buckets around the plays.
+        params = {"start": "2023-01-01", "end": "2025-12-31"}
+        result = self.get("timeline", **params)
+        self.assertEqual(result["labels"], ["2024-02", "2024-03"])
+        self.assertEqual(result["values"], [1, 5])
+
+        result = self.get("timeline", bucket="week", music_id=self.symphony.id)
+        self.assertEqual(result["labels"], ["2024-03-04"])
+        self.assertEqual(result["values"], [2])
+
+        empty = self.get("timeline", start="2030-01-01")
+        self.assertEqual((empty["labels"], empty["values"]), ([], []))
+
+    def test_timeline_ends_at_the_last_play_even_in_the_year_9999(self):
+        self.add_play(datetime.date(9999, 12, 31), music=self.symphony)
+        for bucket, label in (("week", "9999-12-27"), ("month", "9999-12")):
+            with self.subTest(bucket=bucket):
+                result = self.get("timeline", bucket=bucket, start="9999-01-01")
+                self.assertEqual(result["labels"], [label])
+                self.assertEqual(result["values"], [1])
+
+    def test_timeline_semesters_still_skip_a_semester_without_plays(self):
+        # Zero-filling covers weeks and months only.
+        self.add_play(datetime.date(2025, 3, 10), music=self.symphony)
+        result = self.get("timeline", bucket="semester")
+        self.assertEqual(result["labels"], ["2023-2", "2024-1", "2025-1"])
+        self.assertEqual(result["values"], [1, 5, 1])
+
     def test_start_and_end_are_inclusive(self):
         result = self.get("summary", start="2024-03-04", end="2024-03-06")
         self.assertEqual(
