@@ -14,6 +14,7 @@ from .stats import (
     DiversityStatsView,
     FirstPlaysStatsView,
 )
+from .catalog import CatalogDuplicatesView
 
 router = DefaultRouter()
 router.register(r"user", UserViewSet, basename="user")
@@ -71,4 +72,10 @@ urlpatterns = [
     path("stats/genres/", GenreDistributionStatsView.as_view(), name="stats-genres"),
     path("stats/diversity/", DiversityStatsView.as_view(), name="stats-diversity"),
     path("stats/firsts/", FirstPlaysStatsView.as_view(), name="stats-firsts"),
+    # 카탈로그 품질
+    path(
+        "catalog/duplicates/",
+        CatalogDuplicatesView.as_view(),
+        name="catalog-duplicates",
+    ),
 ]
