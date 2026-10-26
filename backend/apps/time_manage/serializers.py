@@ -305,6 +305,45 @@ class TimeMusicListSerializer(serializers.ModelSerializer):
         ]
 
 
+class PlaySerializer(TimeMusicListSerializer):
+    """A row of plays/: the session list's fields, its session and its ids."""
+
+    time_id = serializers.IntegerField(read_only=True)
+    date = serializers.DateField(source="time.date", read_only=True)
+    time = serializers.IntegerField(source="time.time", read_only=True)
+    composer_id = serializers.IntegerField(
+        source="music.composer_id", read_only=True, allow_null=True
+    )
+    music_id = serializers.IntegerField(read_only=True)
+    jigi_names = serializers.SerializerMethodField()
+    mentee_names = serializers.SerializerMethodField()
+
+    class Meta(TimeMusicListSerializer.Meta):
+        fields = TimeMusicListSerializer.Meta.fields + [
+            "time_id",
+            "date",
+            "time",
+            "composer_id",
+            "music_id",
+            "jigi_names",
+            "mentee_names",
+        ]
+
+    def get_jigi_names(self, obj):
+        return [user.name for user in obj.time.users.all()]
+
+    def get_mentee_names(self, obj):
+        return [user.name for user in obj.time.mentees.all()]
+
+
+class PlaysQuerySerializer(serializers.Serializer):
+    """Query of GET plays/. A blank value (?start=) is no filter."""
+
+    q = serializers.CharField(required=False, allow_blank=True)
+    start = serializers.DateField(required=False)
+    end = serializers.DateField(required=False)
+
+
 class TimeInfoDetailSerializer(serializers.ModelSerializer):
     jigi_info = serializers.SerializerMethodField()
     mentee_info = serializers.SerializerMethodField()
