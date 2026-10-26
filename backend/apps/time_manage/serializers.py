@@ -1,8 +1,9 @@
 from django.db import models, transaction
 from django.db.models import Prefetch
+from django.utils import timezone
 from rest_framework import serializers
 from .models import *
-from .stats import StatsFilterSerializer, era_for
+from .stats import ERA_ORDER, StatsFilterSerializer, era_for
 
 
 class BlankAsNullIntegerField(serializers.IntegerField):
@@ -54,14 +55,33 @@ class ComposerSerializer(serializers.ModelSerializer):
     # The 시대 the stats count the composer in: era_override when it is one of
     # ERA_ORDER, else from birth_year, else 미상.
     era = serializers.SerializerMethodField()
+    # PATCH corrects these two, the values era is computed from. Empty (null
+    # or "") clears them.
+    birth_year = BlankAsNullIntegerField(
+        required=False, allow_null=True, min_value=1000
+    )
+    era_override = serializers.ChoiceField(
+        ERA_ORDER, required=False, allow_null=True, allow_blank=True
+    )
 
     class Meta:
         model = Composer
         fields = ["id", "name", "num_time_music", "birth_year", "era_override", "era"]
-        read_only_fields = ["birth_year", "era_override"]
+        read_only_fields = ["name"]
 
     def get_era(self, obj):
         return era_for(obj.birth_year, obj.era_override)
+
+    def validate_birth_year(self, value):
+        this_year = timezone.localdate().year
+        if value is not None and value > this_year:
+            raise serializers.ValidationError(
+                f"Ensure this value is less than or equal to {this_year}."
+            )
+        return value
+
+    def validate_era_override(self, value):
+        return value or None
 
 
 class ComposerQuerySerializer(serializers.Serializer):

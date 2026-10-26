@@ -1,6 +1,7 @@
 import datetime
 
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.time_manage.models import Composer, Music, TimeInfo, TimeMusic
@@ -231,3 +232,194 @@ class MusicCatalogTests(APITestCase):
         Composer.objects.all().delete()
         self.assertEqual(self.get_composers(), [])
         self.assertEqual(self.get_composers(q="브람스", limit=3), [])
+
+
+class ComposerCorrectionTests(APITestCase):
+    """PATCH composers/<id>/ corrects a composer's birth_year and era_override,
+    the two values the stats count its 시대 by. Nothing else is writable."""
+
+    def setUp(self):
+        session = TimeInfo.objects.create(
+            date=datetime.date(2026, 9, 7), time=2, arrival_time="11:20:00"
+        )
+        self.beethoven = Composer.objects.create(name="루트비히 판 베토벤")
+        self.chopin = Composer.objects.create(
+            name="프레데리크 쇼팽", birth_year=1810, era_override="19세기"
+        )
+        for order in [1, 2]:
+            music = Music.objects.create(
+                composer=self.beethoven, title=f"소나타 {order}"
+            )
+            TimeMusic.objects.create(
+                time=session, order=order, source="CD", music=music
+            )
+        self.url = reverse("composerlist-detail", args=[self.beethoven.id])
+
+    def patch(self, body, url=None):
+        return self.client.patch(url or self.url, body, format="json")
+
+    def stored(self, composer=None):
+        composer = Composer.objects.get(id=(composer or self.beethoven).id)
+        return composer.name, composer.birth_year, composer.era_override
+
+    def test_sets_birth_year_and_era_override_and_answers_the_composer(self):
+        response = self.patch({"birth_year": 1770, "era_override": "고전"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "id": self.beethoven.id,
+                "name": "루트비히 판 베토벤",
+                "num_time_music": 2,
+                "birth_year": 1770,
+                "era_override": "고전",
+                "era": "고전",  # 1770 is 낭만 by birth year
+            },
+        )
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, "고전"))
+        detail = self.client.get(self.url)
+        self.assertEqual(detail.json(), response.json())
+
+    def test_sets_one_field_and_keeps_the_other(self):
+        response = self.patch({"birth_year": 1770})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["era"], "낭만")
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, None))
+
+        response = self.patch({"era_override": "고전"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["era"], "고전")
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, "고전"))
+
+        # An override that is not an era, stored before, is kept and still
+        # ignored by era until it is corrected.
+        url = reverse("composerlist-detail", args=[self.chopin.id])
+        response = self.patch({"birth_year": 1811}, url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["era_override"], "19세기")
+        self.assertEqual(response.json()["era"], "낭만")
+        self.assertEqual(self.stored(self.chopin), ("프레데리크 쇼팽", 1811, "19세기"))
+
+    def test_takes_every_era_including_unknown(self):
+        for era in ["중세", "바로크", "고전", "낭만", "근현대", "미상"]:
+            with self.subTest(era=era):
+                response = self.patch({"birth_year": 1770, "era_override": era})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["era"], era)
+                self.assertEqual(self.stored()[2], era)
+
+    def test_null_or_blank_clears_either_field(self):
+        for empty in [None, ""]:
+            with self.subTest(empty=empty):
+                self.patch({"birth_year": 1770, "era_override": "고전"})
+                response = self.patch({"era_override": empty})
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNone(response.json()["era_override"])
+                self.assertEqual(response.json()["era"], "낭만")
+                self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, None))
+
+                response = self.patch({"birth_year": empty})
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNone(response.json()["birth_year"])
+                self.assertEqual(response.json()["era"], "미상")
+                self.assertEqual(self.stored(), ("루트비히 판 베토벤", None, None))
+
+    def test_the_era_chart_counts_the_corrected_era(self):
+        eras = reverse("stats-eras")
+        self.assertEqual(self.client.get(eras).json()["labels"], ["미상"])
+        self.patch({"birth_year": 1770})
+        self.assertEqual(self.client.get(eras).json()["labels"], ["낭만"])
+        self.patch({"era_override": "고전"})
+        self.assertEqual(self.client.get(eras).json()["labels"], ["고전"])
+        self.assertEqual(self.client.get(eras).json()["values"], [2])
+
+    def test_birth_year_from_1000_to_this_year(self):
+        this_year = timezone.localdate().year
+        for year in [1000, 1685, this_year]:
+            with self.subTest(year=year):
+                response = self.patch({"birth_year": year})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.stored()[1], year)
+
+    def test_malformed_birth_year_is_400_naming_it(self):
+        self.patch({"birth_year": 1770, "era_override": "고전"})
+        this_year = timezone.localdate().year
+        for year in [999, this_year + 1, 0, -1770, 2**63, "abc", 1770.5, True, [1770]]:
+            with self.subTest(year=year):
+                response = self.patch({"birth_year": year, "era_override": "낭만"})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(list(response.json()), ["birth_year"])
+                self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, "고전"))
+
+    def test_era_override_not_an_era_is_400_naming_it(self):
+        self.patch({"birth_year": 1770, "era_override": "고전"})
+        for era in ["19세기", "Baroque", " 낭만 ", "고전주의", 5, True, ["낭만"]]:
+            with self.subTest(era=era):
+                response = self.patch({"birth_year": 1810, "era_override": era})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(list(response.json()), ["era_override"])
+                self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, "고전"))
+
+    def test_every_other_field_stays_read_only(self):
+        response = self.patch(
+            {
+                "id": self.chopin.id,
+                "name": "베토벤",
+                "num_time_music": 99,
+                "era": "중세",
+                "birth_year": 1770,
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], self.beethoven.id)
+        self.assertEqual(response.json()["name"], "루트비히 판 베토벤")
+        self.assertEqual(response.json()["num_time_music"], 2)
+        self.assertEqual(response.json()["era"], "낭만")
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, None))
+        self.assertEqual(self.stored(self.chopin), ("프레데리크 쇼팽", 1810, "19세기"))
+
+        # An empty body changes nothing.
+        response = self.patch({})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", 1770, None))
+
+    def test_a_body_that_is_not_an_object_is_400(self):
+        for body in ["1770", "[]", '["고전"]', '"고전"', "true", "null"]:
+            with self.subTest(body=body):
+                response = self.client.patch(
+                    self.url, body, content_type="application/json"
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(list(response.json()), ["non_field_errors"])
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", None, None))
+
+    def test_put_post_and_delete_are_not_allowed(self):
+        body = {"name": "베토벤", "birth_year": 1770, "era_override": "고전"}
+        self.assertEqual(
+            self.client.put(self.url, body, format="json").status_code, 405
+        )
+        self.assertEqual(self.client.delete(self.url).status_code, 405)
+        response = self.client.post(reverse("composerlist-list"), body, format="json")
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(Composer.objects.count(), 2)
+        self.assertEqual(self.stored(), ("루트비히 판 베토벤", None, None))
+        allowed = self.client.options(self.url)["Allow"]
+        self.assertNotIn("PUT", allowed)
+        self.assertIn("PATCH", allowed)
+
+    def test_an_unknown_composer_is_404(self):
+        for composer_id in [9999, 2**63]:
+            with self.subTest(composer_id=composer_id):
+                url = reverse("composerlist-detail", args=[composer_id])
+                response = self.patch({"birth_year": 1770}, url)
+                self.assertEqual(response.status_code, 404)
+
+    def test_patch_takes_two_queries(self):
+        # The composer with its play count, then the UPDATE.
+        with self.assertNumQueries(2):
+            response = self.patch({"birth_year": 1770, "era_override": "고전"})
+        self.assertEqual(response.status_code, 200)
+        # A refused body never reaches the UPDATE.
+        with self.assertNumQueries(1):
+            response = self.patch({"birth_year": 999})
+        self.assertEqual(response.status_code, 400)

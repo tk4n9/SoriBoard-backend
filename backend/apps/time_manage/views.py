@@ -1,4 +1,4 @@
-from rest_framework import generics, viewsets, status, serializers
+from rest_framework import generics, mixins, viewsets, status, serializers
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -376,11 +376,15 @@ class SwapOrderView(APIView):
         return Response({"message": "Order swapped successfully."})
 
 
-class ComposerViewSet(SQLiteIdMixin, viewsets.ReadOnlyModelViewSet):
+class ComposerViewSet(
+    SQLiteIdMixin, mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet
+):
     """Composers, most played first. The list takes ?q= (name contains) and
-    ?limit= (the first n); without them it lists every composer."""
+    ?limit= (the first n); without them it lists every composer. PATCH
+    corrects one composer's birth_year and era_override; there is no PUT."""
 
     serializer_class = ComposerSerializer
+    http_method_names = ["get", "patch", "head", "options"]
 
     def get_queryset(self):
         composers = Composer.objects.annotate(
