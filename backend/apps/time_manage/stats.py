@@ -223,23 +223,40 @@ def diversity_metrics(counts, n_possible):
     }
 
 
-def genre_counts(qs):
-    """필터된 TimeMusic 쿼리셋 → {장르: 선곡수}.
+def plays_with_instruments(qs, *fields):
+    """필터된 TimeMusic 쿼리셋 → (선곡 dict 목록, {선곡 id: 연주자 instrument 목록}).
 
-    players(M2M) 조인이 행을 부풀리지 않도록 prefetch 후 파이썬에서 집계하며,
-    필터 조인으로 생길 수 있는 중복 행은 id 로 1회만 센다.
+    선곡 dict 는 id, music_id, music__title, orchestra_id 와 fields 를 담는다.
+    모델 인스턴스(+ players prefetch)로 읽으면 5,000곡에 0.5초가 넘게 걸려
+    values() 로 읽는다. players(M2M)는 따로 한 번에 읽어 행을 부풀리지 않고,
+    distinct 쿼리셋이라 필터 조인의 중복 행은 한 dict 로 접힌다.
     """
+    plays = list(qs.values("id", "music_id", "music__title", "orchestra_id", *fields))
+    instruments = defaultdict(list)
+    if plays:
+        rows = TimeMusic.players.through.objects.filter(
+            timemusic_id__in=qs.values("id")
+        ).values_list("timemusic_id", "player__instrument")
+        for play_id, instrument in rows:
+            instruments[play_id].append(instrument)
+    return plays, instruments
+
+
+def genre_of(play, instruments):
+    """plays_with_instruments 의 선곡 dict 하나 → 장르 라벨."""
+    return genre_for(
+        play["music__title"],
+        play["orchestra_id"] is not None,
+        instruments[play["id"]],
+    )
+
+
+def genre_counts(qs):
+    """필터된 TimeMusic 쿼리셋 → {장르: 선곡수}. 선곡마다 1회 센다."""
     buckets = {label: 0 for label in GENRE_ORDER}
-    seen = set()
-    plays = qs.select_related("music", "orchestra").prefetch_related("players")
-    for tm in plays:
-        if tm.id in seen:
-            continue
-        seen.add(tm.id)
-        instruments = [p.instrument for p in tm.players.all()]
-        title = tm.music.title if tm.music_id else ""
-        genre = genre_for(title, tm.orchestra_id is not None, instruments)
-        buckets[genre] += 1
+    plays, instruments = plays_with_instruments(qs)
+    for play in plays:
+        buckets[genre_of(play, instruments)] += 1
     return buckets
 
 
@@ -774,9 +791,13 @@ class DiversityStatsView(APIView):
         if bucket not in ("week", "month"):
             bucket = "week"
 
-        plays = qs.select_related(
-            "time", "music", "music__composer", "orchestra"
-        ).prefetch_related("players")
+        plays, instruments = plays_with_instruments(
+            qs,
+            "time__date",
+            "music__composer__id",
+            "music__composer__birth_year",
+            "music__composer__era_override",
+        )
 
         era_all = defaultdict(int)
         genre_all = defaultdict(int)
@@ -787,44 +808,36 @@ class DiversityStatsView(APIView):
         per_plays = defaultdict(int)
         per_works = defaultdict(set)
 
-        seen = set()
-        total = 0
-        for tm in plays:
-            if tm.id in seen:
-                continue
-            seen.add(tm.id)
-            total += 1
-
-            date = tm.time.date
+        total = len(plays)
+        for play in plays:
+            date = play["time__date"]
             if bucket == "week":
                 start = date - datetime.timedelta(days=date.weekday())
                 key = start.strftime("%Y-%m-%d")
             else:
                 key = date.strftime("%Y-%m")
 
-            composer = (
-                tm.music.composer if (tm.music_id and tm.music.composer_id) else None
-            )
+            composer_id = play["music__composer__id"]
             era = (
-                era_for(composer.birth_year, composer.era_override)
-                if composer
+                era_for(
+                    play["music__composer__birth_year"],
+                    play["music__composer__era_override"],
+                )
+                if composer_id
                 else "미상"
             )
-
-            instruments = [p.instrument for p in tm.players.all()]
-            title = tm.music.title if tm.music_id else ""
-            genre = genre_for(title, tm.orchestra_id is not None, instruments)
+            genre = genre_of(play, instruments)
 
             era_all[era] += 1
             genre_all[genre] += 1
             per_era[key][era] += 1
             per_genre[key][genre] += 1
             per_plays[key] += 1
-            if tm.music_id:
-                works.add(tm.music_id)
-                per_works[key].add(tm.music_id)
-            if composer:
-                composers.add(composer.id)
+            if play["music_id"]:
+                works.add(play["music_id"])
+                per_works[key].add(play["music_id"])
+            if composer_id:
+                composers.add(composer_id)
 
         # 기간 전체 요약 분포.
         era_known = {e: c for e, c in era_all.items() if e != "미상"}

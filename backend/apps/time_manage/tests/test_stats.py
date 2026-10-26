@@ -1,6 +1,8 @@
 import datetime
+from unittest import mock
 
 from django.db import connection
+from django.db.models import Model
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework.test import APITestCase
@@ -99,6 +101,12 @@ class StatsRequests:
 class EmptyStatsTests(StatsRequests, APITestCase):
     def test_no_plays_gives_zero_counts_and_empty_charts(self):
         self.assert_no_plays()
+
+    def test_no_plays_skip_the_players_query_of_genres_and_diversity(self):
+        with self.assertNumQueries(2):
+            self.get("genres")
+        with self.assertNumQueries(1):
+            self.get("diversity")
 
     def test_no_plays_give_no_firsts_of_either_kind(self):
         for kind in ("composer", "work"):
@@ -699,6 +707,162 @@ class StatsTests(StatsRequests, APITestCase):
         result = self.get("diversity", bucket="year")
         self.assertEqual(result["filters"]["bucket"], "week")
         self.assertEqual(result["timeline"]["bucket"], "week")
+
+    # genres and diversity classify every play with its players' instruments.
+    def add_april_plays(self):
+        """Six plays over two April weeks that reach each genre rule.
+
+        Every session has the mentee as member and mentee, so the
+        include_mentees join returns each play on two rows.
+        """
+        brahms = Composer.objects.get(name="브람스")
+        bach = Composer.objects.get(name="바흐")
+        pianists = [
+            Player.objects.create(name=f"피아니스트 {n}", instrument="피아노")
+            for n in (1, 2)
+        ]
+        cases = [
+            # No work, an orchestra and a singer: 기타 (vocal), 미상.
+            (
+                1,
+                1,
+                {
+                    "orchestra": self.berlin,
+                    "players": [
+                        Player.objects.create(name="가수", instrument="소프라노")
+                    ],
+                },
+            ),
+            # No work, nothing else: 기타, 미상.
+            (1, 2, {}),
+            # 협주곡 by title, two soloists, 낭만.
+            (
+                2,
+                1,
+                {
+                    "music": Music.objects.get(title="피아노 협주곡 제2번"),
+                    "orchestra": self.vienna,
+                    "players": pianists,
+                },
+            ),
+            # An orchestra without soloists: 관현악곡, 고전.
+            (
+                8,
+                1,
+                {
+                    "music": Music.objects.create(
+                        composer=self.mozart, title="세레나데"
+                    ),
+                    "orchestra": self.berlin,
+                },
+            ),
+            # One player: 독주곡, 바로크.
+            (
+                8,
+                2,
+                {
+                    "music": Music.objects.create(composer=bach, title="파르티타"),
+                    "players": [self.cellist],
+                },
+            ),
+            # 교향곡 by title, though it has an orchestra and soloists.
+            (
+                9,
+                1,
+                {"music": self.symphony, "orchestra": self.berlin, "players": pianists},
+            ),
+        ]
+        for day, time, fields in cases:
+            self.add_play(
+                datetime.date(2024, 4, day),
+                time=time,
+                users=[self.member, self.mentee],
+                mentees=[self.mentee],
+                **fields,
+            )
+        return {"start": "2024-04-01", "end": "2024-04-14"}
+
+    def test_genres_and_diversity_classify_plays_with_and_without_works_once(self):
+        april = self.add_april_plays()
+        mentee = {"user_id": self.mentee.id, "include_mentees": "true"}
+        for params in (april, {**april, **mentee}):
+            with self.subTest(params=params):
+                genres = self.get("genres", **params)
+                self.assertEqual(genres["total_plays"], 6)
+                self.assertEqual(
+                    self.counts(genres),
+                    {"교향곡": 1, "협주곡": 1, "관현악곡": 1, "독주곡": 1, "기타": 2},
+                )
+                self.assertEqual(
+                    genres["labels"], ["교향곡", "협주곡", "관현악곡", "독주곡", "기타"]
+                )
+
+                diversity = self.get("diversity", **params)
+                self.assertEqual(diversity["total_plays"], 6)
+                self.assertEqual(
+                    diversity["summary"],
+                    {
+                        "distinct_works": 4,
+                        "distinct_composers": 3,
+                        "era": {
+                            "labels": ["바로크", "고전", "낭만"],
+                            "values": [1, 2, 1],
+                            "unknown_share": 0.3333,
+                            "entropy": 1.0397,
+                            "evenness": 0.646,
+                        },
+                        "genre": {
+                            "labels": [
+                                "교향곡",
+                                "협주곡",
+                                "관현악곡",
+                                "독주곡",
+                                "기타",
+                            ],
+                            "values": [1, 1, 1, 1, 2],
+                            "entropy": 1.5607,
+                            "evenness": 0.871,
+                        },
+                    },
+                )
+                self.assertEqual(
+                    diversity["timeline"],
+                    {
+                        "bucket": "week",
+                        "labels": ["2024-04-01", "2024-04-08"],
+                        "plays": [3, 3],
+                        "distinct_works": [1, 3],
+                        "era_evenness": [0.0, 0.3955],
+                        "genre_evenness": [0.3552, 0.6131],
+                    },
+                )
+
+    def test_genres_take_three_queries_and_diversity_two(self):
+        april = self.add_april_plays()
+        mentee = {"user_id": self.mentee.id, "include_mentees": "true"}
+        for params in ({}, april, {**april, **mentee}):
+            with self.subTest(params=params):
+                with self.assertNumQueries(3):
+                    self.get("genres", **params)
+                with self.assertNumQueries(2):
+                    self.get("diversity", **params)
+
+    def test_genres_and_diversity_build_no_model_instances(self):
+        # Loading every play and its players as model instances took about
+        # 0.5 s (genres) and 0.8 s (diversity) on 5,000 plays.
+        self.add_april_plays()
+        built = []
+        from_db = Model.from_db.__func__
+
+        def counting_from_db(cls, db, field_names, values):
+            built.append(cls.__name__)
+            return from_db(cls, db, field_names, values)
+
+        with mock.patch.object(Model, "from_db", classmethod(counting_from_db)):
+            for name in ("genres", "diversity"):
+                for bucket in ("week", "month"):
+                    self.assertEqual(self.get(name, bucket=bucket)["total_plays"], 12)
+        self.assertEqual(built, [])
 
     def test_timeline_buckets_by_month_week_or_semester(self):
         self.assertEqual(
