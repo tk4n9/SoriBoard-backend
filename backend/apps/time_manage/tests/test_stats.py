@@ -628,3 +628,193 @@ class StatsTests(StatsRequests, APITestCase):
             )
         self.assertEqual(self.get("summary")["total_plays"], 26)
         self.assertEqual(query_counts(), before)
+
+    # composer_id, music_id, player_id, conductor_id and orchestra_id narrow the
+    # plays of every endpoint, for the drill-down from a chart's items.
+    def id_filters(self):
+        return [
+            ("composer_id", self.mozart.id, 2),
+            ("music_id", self.symphony.id, 2),
+            ("player_id", self.cellist.id, 2),
+            ("conductor_id", self.karajan.id, 2),
+            ("orchestra_id", self.vienna.id, 1),
+        ]
+
+    def test_each_id_filter_narrows_every_endpoint_and_is_echoed(self):
+        for param, value, plays in self.id_filters():
+            for name in ENDPOINTS:
+                with self.subTest(param=param, endpoint=name):
+                    result = self.get(name, **{param: value})
+                    self.assertEqual(result["total_plays"], plays)
+                    self.assertEqual(result["filters"][param], value)
+                    self.assertEqual(result["filters"]["scope"], "all")
+
+    def test_id_filters_narrow_the_counts(self):
+        mozart = {"composer_id": self.mozart.id}
+        summary = self.get("summary", **mozart)
+        self.assertEqual(
+            summary,
+            {
+                "filters": {"scope": "all", "composer_id": self.mozart.id},
+                "total_plays": 2,
+                "composers": 1,
+                "works": 1,
+                "conductors": 2,
+                "orchestras": 2,
+                "date_start": "2024-03-04",
+                "date_end": "2024-03-06",
+            },
+        )
+        self.assertEqual(
+            self.counts(self.get("conductors", **mozart)), {"카라얀": 1, "번스타인": 1}
+        )
+
+        symphony = {"music_id": self.symphony.id}
+        self.assertEqual(self.counts(self.get("timeline", **symphony)), {"2024-03": 2})
+        self.assertEqual(self.counts(self.get("eras", **symphony)), {"고전": 2})
+
+        karajan = {"conductor_id": self.karajan.id}
+        self.assertEqual(
+            self.counts(self.get("works", **karajan)),
+            {"모차르트 - 교향곡 제40번": 1, "브람스 - 피아노 협주곡 제2번": 1},
+        )
+        self.assertEqual(
+            self.counts(self.get("orchestras", **karajan)), {"베를린 필하모닉": 2}
+        )
+
+        vienna = {"orchestra_id": self.vienna.id}
+        self.assertEqual(self.counts(self.get("conductors", **vienna)), {"번스타인": 1})
+
+        cellist = {"player_id": self.cellist.id}
+        self.assertEqual(
+            self.counts(self.get("composers", **cellist)), {"바흐": 1, "베토벤": 1}
+        )
+        self.assertEqual(
+            self.counts(self.get("genres", **cellist)), {"실내악곡": 1, "독주곡": 1}
+        )
+        # The soloists of those plays: the cellist and the quartet's other players.
+        self.assertEqual(
+            self.counts(self.get("soloists", **cellist)),
+            {
+                "첼리스트 (첼로)": 2,
+                "제1바이올린 (바이올린)": 1,
+                "제2바이올린 (바이올린)": 1,
+                "비올리스트 (비올라)": 1,
+            },
+        )
+        diversity = self.get("diversity", **cellist)
+        self.assertEqual(diversity["summary"]["distinct_works"], 2)
+        self.assertEqual(diversity["timeline"]["labels"], ["2024-02-26", "2024-03-11"])
+
+    def test_player_filter_counts_a_play_once_with_mentee_sessions(self):
+        pianist = Player.objects.get(name="피아니스트")
+        # The 3/4 session has two members and two mentees: the include_mentees
+        # OR join returns its concerto on four rows.
+        params = {
+            "user_id": self.mentee.id,
+            "include_mentees": "true",
+            "player_id": pianist.id,
+        }
+        for name in ENDPOINTS:
+            with self.subTest(endpoint=name):
+                result = self.get(name, **params)
+                self.assertEqual(result["total_plays"], 1)
+                self.assertEqual(result["filters"]["scope"], "individual")
+                self.assertEqual(result["filters"]["player_id"], pianist.id)
+        summary = self.get("summary", **params)
+        for key in ("composers", "works", "conductors", "orchestras"):
+            self.assertEqual(summary[key], 1)
+        self.assertEqual(
+            self.get("soloists", **params)["items"],
+            [{"id": pianist.id, "name": "피아니스트 (피아노)", "count": 1}],
+        )
+        self.assertEqual(self.counts(self.get("timeline", **params)), {"2024-03": 1})
+        self.assertEqual(self.counts(self.get("genres", **params)), {"협주곡": 1})
+
+    def test_id_filters_combine_with_each_other_and_the_period(self):
+        result = self.get(
+            "summary", composer_id=self.mozart.id, conductor_id=self.karajan.id
+        )
+        self.assertEqual(
+            result["filters"],
+            {
+                "scope": "all",
+                "composer_id": self.mozart.id,
+                "conductor_id": self.karajan.id,
+            },
+        )
+        self.assertEqual(result["total_plays"], 1)
+        self.assertEqual(result["date_start"], "2024-03-04")
+
+        result = self.get("summary", composer_id=self.mozart.id, start="2024-03-05")
+        self.assertEqual(result["total_plays"], 1)
+        self.assertEqual(result["date_start"], "2024-03-06")
+
+        result = self.get(
+            "summary", player_id=self.cellist.id, semester_id=self.spring_2024.id
+        )
+        self.assertEqual(result["total_plays"], 1)
+        self.assertEqual(result["date_start"], "2024-03-12")
+
+        bach = Composer.objects.get(name="바흐")
+        result = self.get("summary", composer_id=bach.id, conductor_id=self.karajan.id)
+        self.assertEqual(result["total_plays"], 0)
+
+    def test_unknown_ids_give_empty_stats(self):
+        for param in ("composer_id", "music_id", "player_id"):
+            with self.subTest(param=param):
+                self.assert_no_plays(**{param: 999999})
+        for param in ("conductor_id", "orchestra_id"):
+            with self.subTest(param=param):
+                self.assertEqual(self.get("summary", **{param: 0})["total_plays"], 0)
+
+    def test_malformed_id_filters_get_400_naming_the_parameter(self):
+        params = [p for p, _, _ in self.id_filters()]
+        for name in ENDPOINTS:
+            for param in params:
+                for value in ("abc", "1.5", "9" * 20, "-" + "9" * 20):
+                    with self.subTest(endpoint=name, param=param, value=value):
+                        error = self.get_error(name, **{param: value})
+                        self.assertEqual(list(error), [param])
+                        self.assertTrue(error[param])
+
+    def test_blank_id_filters_are_ignored(self):
+        params = {p: "" for p, _, _ in self.id_filters()}
+        result = self.get("summary", **params)
+        self.assertEqual(result["filters"], {"scope": "all"})
+        self.assertEqual(result["total_plays"], 6)
+
+    def test_id_filters_add_no_queries(self):
+        # A play that matches all five filters.
+        self.add_play(
+            datetime.date(2024, 3, 13),
+            users=[self.member],
+            players=[self.cellist, Player.objects.get(name="피아니스트")],
+            music=self.symphony,
+            conductor=self.karajan,
+            orchestra=self.vienna,
+        )
+        all_ids = {p: v for p, v, _ in self.id_filters()}
+        scopes = [
+            all_ids,
+            {**all_ids, "user_id": self.member.id, "include_mentees": "true"},
+        ]
+
+        def query_counts(params):
+            counts = {}
+            for name in ENDPOINTS:
+                with CaptureQueriesContext(connection) as queries:
+                    result = self.get(name, **params)
+                counts[name] = len(queries), result["total_plays"]
+            return counts
+
+        unfiltered = {name: n for name, (n, _) in query_counts({}).items()}
+        for params in scopes:
+            with self.subTest(params=params):
+                counts = query_counts(params)
+                self.assertEqual({k: n for k, (n, _) in counts.items()}, unfiltered)
+                self.assertEqual({t for _, t in counts.values()}, {1})
+
+        # The counts and the date span, as without filters.
+        with self.assertNumQueries(2):
+            self.get("summary", **all_ids)

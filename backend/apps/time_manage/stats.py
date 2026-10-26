@@ -12,6 +12,8 @@ play history = TimeMusic ⨝ TimeInfo. 모든 엔드포인트는 공통 필터(`
     }
 
 필터 파라미터 형식이 틀리면 400 과 DRF 필드별 오류(예: {"start": [...]})를 돌려준다.
+composer_id/music_id/player_id/conductor_id/orchestra_id 를 주면 그 대상의 선곡만
+센다(차트 items 의 id 로 drill-down).
 """
 
 import datetime
@@ -262,14 +264,29 @@ class StatsFilterSerializer(serializers.Serializer):
     end = serializers.DateField(required=False)
     semester_id = serializers.IntegerField(required=False, **_ID_RANGE)
     user_id = serializers.IntegerField(required=False, **_ID_RANGE)
+    composer_id = serializers.IntegerField(required=False, **_ID_RANGE)
+    music_id = serializers.IntegerField(required=False, **_ID_RANGE)
+    player_id = serializers.IntegerField(required=False, **_ID_RANGE)
+    conductor_id = serializers.IntegerField(required=False, **_ID_RANGE)
+    orchestra_id = serializers.IntegerField(required=False, **_ID_RANGE)
+
+
+# 대상 id 파라미터 → TimeMusic 필드. player_id 는 M2M 이라 따로 처리한다.
+_ID_FILTERS = {
+    "composer_id": "music__composer_id",
+    "music_id": "music_id",
+    "conductor_id": "conductor_id",
+    "orchestra_id": "orchestra_id",
+}
 
 
 def build_timemusic_filter(params):
     """쿼리 파라미터를 TimeMusic 필터(Q 객체)로 변환.
 
-    지원 파라미터: start, end (YYYY-MM-DD), semester_id, user_id, include_mentees.
+    지원 파라미터: start, end (YYYY-MM-DD), semester_id, user_id, include_mentees,
+    composer_id, music_id, player_id, conductor_id, orchestra_id (모두 AND).
     적용된 필터 정보를 함께 돌려준다(응답 봉투의 filters 필드).
-    start/end/semester_id/user_id 형식이 틀리면 ValidationError(400)를 던진다.
+    날짜/id 형식이 틀리면 ValidationError(400)를 던진다.
     """
     filters = StatsFilterSerializer(data=params)
     filters.is_valid(raise_exception=True)
@@ -309,6 +326,20 @@ def build_timemusic_filter(params):
         applied["scope"] = "individual"
         applied["user_id"] = user_id
         applied["include_mentees"] = include_mentees
+
+    for param, field in _ID_FILTERS.items():
+        value = filters.validated_data.get(param)
+        if value is not None:
+            q &= Q(**{field: value})
+            applied[param] = value
+
+    player_id = filters.validated_data.get("player_id")
+    if player_id is not None:
+        # 조인 대신 서브쿼리: 한 곡이 여러 행이 되지 않고, soloists 집계의
+        # players 조인도 이 필터에 묶이지 않아 함께 연주한 연주자까지 센다.
+        through = TimeMusic.players.through.objects.filter(player_id=player_id)
+        q &= Q(id__in=through.values("timemusic_id"))
+        applied["player_id"] = player_id
 
     return q, applied
 
