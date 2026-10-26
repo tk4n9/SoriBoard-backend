@@ -14,13 +14,17 @@ play history = TimeMusic ⨝ TimeInfo. 모든 엔드포인트는 공통 필터(`
 필터 파라미터 형식이 틀리면 400 과 DRF 필드별 오류(예: {"start": [...]})를 돌려준다.
 composer_id/music_id/player_id/conductor_id/orchestra_id 를 주면 그 대상의 선곡만
 센다(차트 items 의 id 로 drill-down).
+
+stats/firsts/?kind=composer|work 는 클럽 전체에서 처음 튼 날(필터와 무관)이 필터
+기간에 드는 작곡가·곡을 처음 튼 날, 이름 순으로 준다(학기 결산). items 는
+{id, name, count, first_played}, count 는 필터에 드는 선곡 수.
 """
 
 import datetime
 import math
 from collections import defaultdict
 
-from django.db.models import Count, Max, Min, Q
+from django.db.models import Count, Max, Min, OuterRef, Q, Subquery
 from django.db.models.functions import TruncMonth, TruncWeek
 from rest_framework import serializers
 from rest_framework.response import Response
@@ -822,5 +826,80 @@ class DiversityStatsView(APIView):
                 "total_plays": total,
                 "summary": summary,
                 "timeline": timeline,
+            }
+        )
+
+
+class FirstsQuerySerializer(StatsFilterSerializer):
+    """stats/firsts 파라미터. kind 가 비면 composer."""
+
+    kind = serializers.ChoiceField(
+        choices=["composer", "work"], required=False, allow_blank=True
+    )
+
+
+class FirstPlaysStatsView(APIView):
+    """기간 안에 처음 선곡된 작곡가·곡(학기 결산). ?kind=composer|work (기본 composer).
+
+    처음 튼 날(first_played)은 필터와 상관없이 클럽 전체 선곡 중 첫 날짜다.
+    그 날짜가 필터 기간(start/end, 또는 학기)에 들고 필터에 드는 선곡이 있는
+    대상만, 처음 튼 날·이름·id 순으로 모두 준다. count 는 필터에 드는 선곡 수.
+    기간을 주지 않으면 필터에 드는 모든 대상이 해당한다.
+    """
+
+    def get(self, request):
+        params = FirstsQuerySerializer(data=request.query_params)
+        params.is_valid(raise_exception=True)
+        kind = params.validated_data.get("kind") or "composer"
+        qs, applied = base_queryset(request)
+        total = qs.count()
+
+        if kind == "composer":
+            id_field, own_field = "music__composer__id", "music__composer_id"
+            fields = [id_field, "music__composer__name"]
+        else:
+            id_field, own_field = "music__id", "music_id"
+            fields = [id_field, "music__title", "music__composer__name"]
+        first = (
+            TimeMusic.objects.filter(**{own_field: OuterRef(id_field)})
+            .order_by("time__date")
+            .values("time__date")[:1]
+        )
+        rows = (
+            qs.exclude(**{f"{id_field}__isnull": True})
+            .values(*fields)
+            .annotate(first_played=Subquery(first))
+        )
+        # 끝 날짜는 따로 볼 필요가 없다: 첫 선곡일은 필터에 드는 선곡일보다 늦지 않다.
+        if "start" in applied:
+            rows = rows.filter(
+                first_played__gte=datetime.date.fromisoformat(applied["start"])
+            )
+        rows = rows.annotate(count=Count("id", distinct=True)).order_by()
+
+        items = []
+        for row in rows:
+            if kind == "composer":
+                name = row["music__composer__name"]
+            else:
+                composer = row["music__composer__name"] or ""
+                title = row["music__title"]
+                name = f"{composer} - {title}" if composer else title
+            items.append(
+                {
+                    "id": row[id_field],
+                    "name": name,
+                    "count": row["count"],
+                    "first_played": str(row["first_played"]),
+                }
+            )
+        items.sort(key=lambda item: (item["first_played"], item["name"], item["id"]))
+        return Response(
+            {
+                "filters": {**applied, "kind": kind},
+                "total_plays": total,
+                "labels": [item["name"] for item in items],
+                "values": [item["count"] for item in items],
+                "items": items,
             }
         )

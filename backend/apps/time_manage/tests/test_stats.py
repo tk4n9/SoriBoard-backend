@@ -29,6 +29,7 @@ ENDPOINTS = [
     "eras",
     "genres",
     "diversity",
+    "firsts",
 ]
 
 
@@ -61,7 +62,7 @@ class StatsRequests:
         self.assertIsNone(summary["date_start"])
         self.assertIsNone(summary["date_end"])
 
-        for name in ("composers", "works", "eras", "genres"):
+        for name in ("composers", "works", "eras", "genres", "firsts"):
             with self.subTest(endpoint=name):
                 result = self.get(name, **params)
                 self.assertEqual(result["total_plays"], 0)
@@ -98,6 +99,22 @@ class StatsRequests:
 class EmptyStatsTests(StatsRequests, APITestCase):
     def test_no_plays_gives_zero_counts_and_empty_charts(self):
         self.assert_no_plays()
+
+    def test_no_plays_give_no_firsts_of_either_kind(self):
+        for kind in ("composer", "work"):
+            with self.subTest(kind=kind):
+                with self.assertNumQueries(2):
+                    result = self.get("firsts", kind=kind)
+                self.assertEqual(
+                    result,
+                    {
+                        "filters": {"scope": "all", "kind": kind},
+                        "total_plays": 0,
+                        "labels": [],
+                        "values": [],
+                        "items": [],
+                    },
+                )
 
 
 class StatsTests(StatsRequests, APITestCase):
@@ -942,3 +959,202 @@ class StatsTests(StatsRequests, APITestCase):
         # The counts and the date span, as without filters.
         with self.assertNumQueries(2):
             self.get("summary", **all_ids)
+
+    # stats/firsts: the composers or works first played in the club in the
+    # filtered range, for the 학기 결산.
+    def test_firsts_list_composers_by_first_play_then_name(self):
+        result = self.get("firsts")
+        self.assertEqual(result["filters"], {"scope": "all", "kind": "composer"})
+        self.assertEqual(result["total_plays"], 6)
+        ids = {c.name: c.id for c in Composer.objects.all()}
+        self.assertEqual(
+            result["items"],
+            [
+                {
+                    "id": ids["바흐"],
+                    "name": "바흐",
+                    "count": 1,
+                    "first_played": "2024-02-29",
+                },
+                {
+                    "id": ids["모차르트"],
+                    "name": "모차르트",
+                    "count": 2,
+                    "first_played": "2024-03-04",
+                },
+                {
+                    "id": ids["브람스"],
+                    "name": "브람스",
+                    "count": 1,
+                    "first_played": "2024-03-04",
+                },
+                {
+                    "id": ids["베토벤"],
+                    "name": "베토벤",
+                    "count": 1,
+                    "first_played": "2024-03-12",
+                },
+                {
+                    "id": ids["작자 미상"],
+                    "name": "작자 미상",
+                    "count": 1,
+                    "first_played": "2024-03-12",
+                },
+            ],
+        )
+        self.assertEqual(
+            result["labels"], ["바흐", "모차르트", "브람스", "베토벤", "작자 미상"]
+        )
+        self.assertEqual(result["values"], [1, 2, 1, 1, 1])
+
+    def test_firsts_on_the_same_day_are_ordered_by_name_then_id(self):
+        # Added after 베토벤 and 작자 미상, first played the same day.
+        gabrieli = Composer.objects.create(name="가브리엘리")
+        twin = Composer.objects.create(name="가브리엘리")
+        for time, composer in ((2, twin), (3, gabrieli)):
+            self.add_play(
+                datetime.date(2024, 3, 12),
+                time=time,
+                music=Music.objects.create(composer=composer, title="칸초나"),
+            )
+        result = self.get("firsts", start="2024-03-12")
+        self.assertEqual(
+            [(item["id"], item["name"]) for item in result["items"]],
+            [
+                (gabrieli.id, "가브리엘리"),
+                (twin.id, "가브리엘리"),
+                (Composer.objects.get(name="베토벤").id, "베토벤"),
+                (Composer.objects.get(name="작자 미상").id, "작자 미상"),
+            ],
+        )
+
+    def test_firsts_list_works_named_like_stats_works(self):
+        result = self.get("firsts", kind="work", start="2024-03-01")
+        self.assertEqual(
+            result["filters"],
+            {"scope": "all", "start": "2024-03-01", "kind": "work"},
+        )
+        self.assertEqual(result["total_plays"], 5)
+        self.assertEqual(
+            result["items"],
+            [
+                {
+                    "id": self.symphony.id,
+                    "name": "모차르트 - 교향곡 제40번",
+                    "count": 2,
+                    "first_played": "2024-03-04",
+                },
+                {
+                    "id": Music.objects.get(title="피아노 협주곡 제2번").id,
+                    "name": "브람스 - 피아노 협주곡 제2번",
+                    "count": 1,
+                    "first_played": "2024-03-04",
+                },
+                {
+                    "id": Music.objects.get(title="현악 사중주 제14번").id,
+                    "name": "베토벤 - 현악 사중주 제14번",
+                    "count": 1,
+                    "first_played": "2024-03-12",
+                },
+                {
+                    "id": Music.objects.get(title="그레고리오 성가").id,
+                    "name": "작자 미상 - 그레고리오 성가",
+                    "count": 1,
+                    "first_played": "2024-03-12",
+                },
+            ],
+        )
+
+    def test_firsts_first_play_is_all_time_not_the_filtered_range(self):
+        # Mozart and his symphony were first played on 3/4, before the range,
+        # so their 3/6 play is not a first.
+        composers = self.get("firsts", start="2024-03-05")
+        self.assertEqual(composers["labels"], ["베토벤", "작자 미상"])
+        works = self.get("firsts", kind="work", start="2024-03-05")
+        self.assertEqual(
+            works["labels"],
+            ["베토벤 - 현악 사중주 제14번", "작자 미상 - 그레고리오 성가"],
+        )
+        # Bach was first played on the leap day, the end of fall 2023.
+        result = self.get("firsts", semester_id=self.fall_2023.id)
+        self.assertEqual(result["labels"], ["바흐"])
+        self.assertEqual(
+            self.get("firsts", semester_id=self.spring_2024.id)["labels"],
+            ["모차르트", "브람스", "베토벤", "작자 미상"],
+        )
+        self.assertEqual(self.get("firsts", start="2024-03-13")["items"], [])
+
+    def test_firsts_count_only_the_plays_in_the_filtered_range(self):
+        self.add_play(datetime.date(2024, 9, 2), music=self.symphony)
+        result = self.get("firsts", start="2024-03-04", end="2024-03-06")
+        self.assertEqual(self.counts(result), {"모차르트": 2, "브람스": 1})
+        result = self.get("firsts", start="2024-03-04")
+        self.assertEqual(self.counts(result)["모차르트"], 3)
+        self.assertEqual(result["items"][0]["first_played"], "2024-03-04")
+        # Played again in fall 2024, but first played in spring.
+        self.assertEqual(self.get("firsts", semester_id=self.fall_2024.id)["items"], [])
+
+    def test_firsts_take_the_other_filters(self):
+        # The member played Bach on 2/29 and Mozart and Brahms on 3/4.
+        result = self.get("firsts", user_id=self.member.id, start="2024-03-01")
+        self.assertEqual(self.counts(result), {"모차르트": 1, "브람스": 1})
+        result = self.get("firsts", user_id=self.mentee.id)
+        self.assertEqual(self.counts(result), {"베토벤": 1, "작자 미상": 1})
+        result = self.get("firsts", kind="work", conductor_id=self.karajan.id)
+        self.assertEqual(
+            self.counts(result),
+            {"모차르트 - 교향곡 제40번": 1, "브람스 - 피아노 협주곡 제2번": 1},
+        )
+        result = self.get("firsts", player_id=self.cellist.id, start="2024-03-01")
+        self.assertEqual(self.counts(result), {"베토벤": 1})
+        # Bernstein conducted the symphony on 3/6, after its first play on 3/4.
+        result = self.get("firsts", conductor_id=self.bernstein.id, start="2024-03-05")
+        self.assertEqual(result["items"], [])
+
+    def test_firsts_count_a_play_once_with_mentee_sessions(self):
+        # The 3/4 session has two members and two mentees, so the OR across both
+        # M2M joins returns each of its plays on more than one row.
+        params = {"user_id": self.mentee.id, "include_mentees": "true"}
+        result = self.get("firsts", **params)
+        self.assertEqual(result["total_plays"], 5)
+        self.assertEqual(
+            self.counts(result),
+            {"모차르트": 2, "브람스": 1, "베토벤": 1, "작자 미상": 1},
+        )
+        result = self.get("firsts", kind="work", **params)
+        self.assertEqual(sum(result["values"]), 5)
+
+    def test_firsts_leave_out_plays_without_a_work(self):
+        self.add_play(datetime.date(2024, 3, 13))
+        for kind in ("composer", "work"):
+            with self.subTest(kind=kind):
+                result = self.get("firsts", kind=kind, start="2024-03-13")
+                self.assertEqual(result["total_plays"], 1)
+                self.assertEqual(result["items"], [])
+
+    def test_firsts_kind_must_be_composer_or_work(self):
+        for kind in ("composers", "Work", "player", "1"):
+            with self.subTest(kind=kind):
+                error = self.get_error("firsts", kind=kind)
+                self.assertEqual(list(error), ["kind"])
+                self.assertTrue(error["kind"])
+        error = self.get_error("firsts", kind="x", start="garbage")
+        self.assertEqual(set(error), {"kind", "start"})
+        blank = self.get("firsts", kind="")
+        self.assertEqual(blank["filters"]["kind"], "composer")
+        self.assertEqual(len(blank["items"]), 5)
+
+    def test_firsts_take_two_queries(self):
+        scopes = [
+            {},
+            {"kind": "work"},
+            {"user_id": self.mentee.id, "include_mentees": "true", "kind": "work"},
+            {"start": "2025-01-01"},
+        ]
+        for params in scopes:
+            with self.subTest(params=params):
+                with self.assertNumQueries(2):
+                    self.get("firsts", **params)
+        # The semester's months take one more.
+        with self.assertNumQueries(3):
+            self.get("firsts", semester_id=self.spring_2024.id)

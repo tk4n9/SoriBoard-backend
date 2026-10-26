@@ -12,6 +12,7 @@ from .stats import (
     EraDistributionStatsView,
     GenreDistributionStatsView,
     DiversityStatsView,
+    FirstPlaysStatsView,
 )
 
 router = DefaultRouter()
@@ -69,4 +70,5 @@ urlpatterns = [
     path("stats/eras/", EraDistributionStatsView.as_view(), name="stats-eras"),
     path("stats/genres/", GenreDistributionStatsView.as_view(), name="stats-genres"),
     path("stats/diversity/", DiversityStatsView.as_view(), name="stats-diversity"),
+    path("stats/firsts/", FirstPlaysStatsView.as_view(), name="stats-firsts"),
 ]
