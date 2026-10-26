@@ -10,6 +10,7 @@ from apps.time_manage.models import (
     MusicDetail,
     Orchestra,
     Player,
+    Semester,
     TimeInfo,
     TimeMusic,
     User,
@@ -34,7 +35,22 @@ class PlaysRequests:
 
 class EmptyPlaysTests(PlaysRequests, APITestCase):
     def test_no_plays_give_an_empty_page_in_one_query(self):
-        for params in ({}, {"limit": 10}, {"q": "바흐", "start": "2024-01-01"}):
+        stats_filters = {
+            "user_id": 1,
+            "include_mentees": "true",
+            "composer_id": 1,
+            "music_id": 1,
+            "player_id": 1,
+            "conductor_id": 1,
+            "orchestra_id": 1,
+            "requested": "true",
+        }
+        for params in (
+            {},
+            {"limit": 10},
+            {"q": "바흐", "start": "2024-01-01"},
+            stats_filters,
+        ):
             with self.subTest(params=params), self.assertNumQueries(1):
                 self.assertEqual(
                     self.get(**params),
@@ -217,6 +233,145 @@ class PlaysTests(PlaysRequests, APITestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(list(response.json()), [param])
 
+    def test_each_stats_id_filter_lists_only_its_plays(self):
+        brahms = self.duo.music.composer_id
+        pianist = self.second.players.get().id
+        cases = [
+            ({"composer_id": self.bach.id}, [self.first.id]),
+            ({"composer_id": brahms}, [self.duo.id, self.second.id]),
+            ({"music_id": self.suite.id}, [self.first.id]),
+            # The duo has both players and is listed once.
+            ({"player_id": self.cellist.id}, [self.duo.id, self.first.id]),
+            ({"player_id": pianist}, [self.duo.id, self.second.id]),
+            ({"conductor_id": self.second.conductor_id}, [self.second.id]),
+            ({"orchestra_id": self.second.orchestra_id}, [self.second.id]),
+            ({"composer_id": brahms, "player_id": self.cellist.id}, [self.duo.id]),
+            ({"composer_id": 999999}, []),
+            ({"player_id": 999999}, []),
+        ]
+        for params, expected in cases:
+            with self.subTest(params=params):
+                result = self.get(**params)
+                self.assertEqual([row["id"] for row in result["results"]], expected)
+                self.assertEqual(result["count"], len(expected))
+
+    def test_semester_id_takes_its_dates_over_start_and_end_as_in_stats(self):
+        def semester(year, num):
+            return Semester.objects.create(
+                year=year, semester_num=num, start_time="09:30", end_time="17:40"
+            )
+
+        fall_2023, spring_2024 = semester(2023, 2), semester(2024, 1)
+        # 2024 is a leap year: the 2nd semester of 2023 ends on 2024-02-29.
+        winter = TimeMusic.objects.create(
+            time=self.session(datetime.date(2024, 2, 29)), order=1, source="CD"
+        )
+        everything = [self.duo.id, self.second.id, self.first.id]
+        self.assertEqual(self.ids(semester_id=fall_2023.id), [winter.id])
+        self.assertEqual(self.ids(semester_id=spring_2024.id), everything)
+        self.assertEqual(
+            self.ids(semester_id=spring_2024.id, start="2024-03-05"), everything
+        )
+        # An unknown semester is no filter, as in stats/.
+        self.assertEqual(self.ids(semester_id=999999), everything + [winter.id])
+
+    def test_user_id_lists_their_sessions_and_include_mentees_adds_mentored(self):
+        self.assertEqual(
+            self.ids(user_id=self.member.id),
+            [self.duo.id, self.second.id, self.first.id],
+        )
+        self.assertEqual(self.ids(user_id=self.mentee.id), [])
+        for flag in ("true", "1", "yes"):
+            with self.subTest(include_mentees=flag):
+                self.assertEqual(
+                    self.ids(user_id=self.mentee.id, include_mentees=flag),
+                    [self.duo.id],
+                )
+        self.assertEqual(self.ids(user_id=self.mentee.id, include_mentees="false"), [])
+
+    def test_include_mentees_lists_a_play_once_with_two_jigi_and_two_mentees(self):
+        others = [
+            User.objects.create(name=f"지기 {n}", major="국문학과", year_id="22")
+            for n in range(2)
+        ]
+        crowded = self.session(
+            datetime.date(2024, 3, 8),
+            users=[self.member, others[0]],
+            mentees=[self.mentee, others[1]],
+        )
+        play = TimeMusic.objects.create(time=crowded, order=1, source="CD")
+        for user in (self.member, self.mentee):
+            with self.subTest(user=user.name):
+                result = self.get(user_id=user.id, include_mentees="true")
+                self.assertEqual(result["results"][0]["id"], play.id)
+                ids = [row["id"] for row in result["results"]]
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertEqual(result["count"], len(ids))
+        self.assertEqual(
+            self.get(user_id=self.member.id, include_mentees="true")["count"], 4
+        )
+        self.assertEqual(
+            self.ids(user_id=self.mentee.id, include_mentees="true"),
+            [play.id, self.duo.id],
+        )
+
+    def test_requested_lists_only_or_no_requests_and_absent_lists_both(self):
+        self.assertEqual(self.ids(requested="true"), [self.duo.id])
+        self.assertEqual(self.ids(requested="1"), [self.duo.id])
+        self.assertEqual(self.ids(requested="false"), [self.second.id, self.first.id])
+        self.assertEqual(self.ids(requested="0"), [self.second.id, self.first.id])
+        # Absent or blank is both, not false.
+        self.assertEqual(self.ids(), [self.duo.id, self.second.id, self.first.id])
+        self.assertEqual(
+            self.ids(requested=""), [self.duo.id, self.second.id, self.first.id]
+        )
+
+    def test_filters_combine_with_q_dates_and_each_other(self):
+        brahms = self.duo.music.composer_id
+        self.assertEqual(self.ids(composer_id=brahms, q="첼로"), [self.duo.id])
+        self.assertEqual(
+            self.ids(composer_id=brahms, requested="false"), [self.second.id]
+        )
+        self.assertEqual(
+            self.ids(player_id=self.cellist.id, end="2024-03-04"), [self.first.id]
+        )
+        self.assertEqual(
+            self.ids(user_id=self.mentee.id, include_mentees="true", requested="false"),
+            [],
+        )
+
+    def test_malformed_filters_get_400_naming_each_parameter(self):
+        for param, value in [
+            ("semester_id", "abc"),
+            ("user_id", "1.5"),
+            ("composer_id", "x"),
+            ("music_id", "abc"),
+            ("player_id", str(2**63)),
+            ("conductor_id", "-"),
+            ("orchestra_id", "1e3"),
+            ("requested", "maybe"),
+        ]:
+            with self.subTest(param=param, value=value):
+                response = self.client.get(reverse("plays"), {param: value})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(list(response.json()), [param])
+        response = self.client.get(
+            reverse("plays"), {"start": "bad", "composer_id": "x", "requested": "2"}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.json()), {"start", "composer_id", "requested"})
+
+    def test_page_links_keep_the_filters(self):
+        brahms = self.duo.music.composer_id
+        result = self.get(limit=1, composer_id=brahms, requested="false")
+        self.assertEqual([row["id"] for row in result["results"]], [self.second.id])
+        self.assertIsNone(result["next"])
+        result = self.get(limit=1, composer_id=brahms)
+        self.assertIn(f"composer_id={brahms}", result["next"])
+        self.assertEqual(
+            self.client.get(result["next"]).json()["results"][0]["id"], self.second.id
+        )
+
     def test_pages_go_by_limit_and_offset(self):
         result = self.get(limit=2)
         self.assertEqual(
@@ -285,3 +440,22 @@ class PlaysPagingTests(PlaysRequests, APITestCase):
             self.assertEqual(len(result["results"][-1]["player_names"]), 3)
         with self.assertNumQueries(5):
             self.get(q="연주자")
+
+    def test_the_stats_filters_add_no_query_but_the_semester_lookup(self):
+        filters = {
+            "user_id": self.mentee.id,
+            "include_mentees": "true",
+            "composer_id": self.music.composer_id,
+            "music_id": self.music.id,
+            "requested": "false",
+        }
+        with self.assertNumQueries(5):
+            result = self.get(limit=100, **filters)
+        self.assertEqual(len(result["results"]), 100)
+        self.assertEqual(result["count"], 120)
+        spring_2024 = Semester.objects.create(
+            year=2024, semester_num=1, start_time="09:30", end_time="17:40"
+        )
+        with self.assertNumQueries(6):
+            result = self.get(limit=100, semester_id=spring_2024.id, **filters)
+        self.assertEqual(result["count"], 120)

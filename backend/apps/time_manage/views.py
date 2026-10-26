@@ -10,6 +10,7 @@ from .serializers import *
 from django.db import transaction
 from django.db.models import Count, Q, prefetch_related_objects
 from django.http import Http404
+from .stats import build_timemusic_filter
 
 
 def get_object_or_404(queryset, *filter_args, **filter_kwargs):
@@ -518,7 +519,11 @@ class PlaysPagination(LimitOffsetPagination):
 class PlaysView(generics.ListAPIView):
     """Plays across all 타임, newest first, in pages of {count, next, previous,
     results}. ?q= matches composer, title, 세부 제목, a player's name or
-    instrument, conductor or orchestra; ?start=&end= (YYYY-MM-DD) are inclusive."""
+    instrument, conductor or orchestra. The stats filter (build_timemusic_filter:
+    start, end, semester_id, user_id with include_mentees, composer_id, music_id,
+    player_id, conductor_id, orchestra_id) narrows the plays as in stats/, so a
+    stats card links to the plays it counted; ?requested=true|false keeps only
+    or no 신청곡 (absent: both)."""
 
     serializer_class = PlaySerializer
     pagination_class = PlaysPagination
@@ -526,14 +531,13 @@ class PlaysView(generics.ListAPIView):
     def get_queryset(self):
         query = PlaysQuerySerializer(data=self.request.query_params)
         query.is_valid(raise_exception=True)
-        plays = TimeMusic.objects.all()
+        stats_filter, _ = build_timemusic_filter(self.request.query_params)
+        # include_mentees joins 지기 and 견습 지기: one play, several rows.
+        plays = TimeMusic.objects.filter(stats_filter).distinct()
 
-        start = query.validated_data.get("start")
-        end = query.validated_data.get("end")
-        if start:
-            plays = plays.filter(time__date__gte=start)
-        if end:
-            plays = plays.filter(time__date__lte=end)
+        requested = query.validated_data.get("requested")
+        if requested is not None:
+            plays = plays.filter(is_requested=requested)
 
         q = query.validated_data.get("q", "").strip()
         if q:

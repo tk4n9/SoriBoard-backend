@@ -2,6 +2,7 @@ from django.db import models, transaction
 from django.db.models import Prefetch
 from rest_framework import serializers
 from .models import *
+from .stats import StatsFilterSerializer
 
 
 class BlankAsNullIntegerField(serializers.IntegerField):
@@ -336,12 +337,13 @@ class PlaySerializer(TimeMusicListSerializer):
         return [user.name for user in obj.time.mentees.all()]
 
 
-class PlaysQuerySerializer(serializers.Serializer):
-    """Query of GET plays/. A blank value (?start=) is no filter."""
+class PlaysQuerySerializer(StatsFilterSerializer):
+    """Query of GET plays/: the stats filter, q and requested. A blank value
+    (?start=) is no filter."""
 
     q = serializers.CharField(required=False, allow_blank=True)
-    start = serializers.DateField(required=False)
-    end = serializers.DateField(required=False)
+    # Without default=None a missing ?requested= would read as False.
+    requested = serializers.BooleanField(allow_null=True, default=None)
 
 
 class TimeInfoDetailSerializer(serializers.ModelSerializer):
