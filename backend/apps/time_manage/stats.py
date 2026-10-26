@@ -385,12 +385,18 @@ def _top_by(qs, group_field, name_field, limit, id_field=None):
 # 엔드포인트
 # ---------------------------------------------------------------------------
 class StatsSummaryView(APIView):
-    """헤더 KPI 카드용 요약 수치."""
+    """헤더 KPI 카드용 요약 수치.
+
+    sessions 는 필터에 드는 곡이 있는 타임 수(곡 없는 타임은 세지 않는다),
+    requested 는 필터에 드는 신청곡 수.
+    """
 
     def get(self, request):
         qs, applied = base_queryset(request)
         agg = qs.aggregate(
             total_plays=Count("id"),
+            sessions=Count("time", distinct=True),
+            requested=Count("id", filter=Q(is_requested=True)),
             composers=Count("music__composer", distinct=True),
             works=Count("music", distinct=True),
             conductors=Count("conductor", distinct=True),
@@ -401,6 +407,8 @@ class StatsSummaryView(APIView):
             {
                 "filters": applied,
                 "total_plays": agg["total_plays"],
+                "sessions": agg["sessions"],
+                "requested": agg["requested"],
                 "composers": agg["composers"],
                 "works": agg["works"],
                 "conductors": agg["conductors"],

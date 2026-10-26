@@ -48,7 +48,15 @@ class StatsRequests:
 
     def assert_no_plays(self, **params):
         summary = self.get("summary", **params)
-        for key in ("total_plays", "composers", "works", "conductors", "orchestras"):
+        for key in (
+            "total_plays",
+            "sessions",
+            "requested",
+            "composers",
+            "works",
+            "conductors",
+            "orchestras",
+        ):
             self.assertEqual(summary[key], 0)
         self.assertIsNone(summary["date_start"])
         self.assertIsNone(summary["date_end"])
@@ -203,6 +211,8 @@ class StatsTests(StatsRequests, APITestCase):
             {
                 "filters": {"scope": "all"},
                 "total_plays": 6,
+                "sessions": 4,
+                "requested": 0,
                 "composers": 5,
                 "works": 5,
                 "conductors": 2,
@@ -211,6 +221,59 @@ class StatsTests(StatsRequests, APITestCase):
                 "date_end": "2024-03-12",
             },
         )
+
+    def test_summary_counts_sessions_and_requests_in_the_filter(self):
+        # 신청곡: the 3/4 concerto and the 3/12 chant.
+        TimeMusic.objects.filter(
+            music__title__in=["피아노 협주곡 제2번", "그레고리오 성가"]
+        ).update(is_requested=True)
+        cases = [
+            ({}, 6, 4, 2),
+            ({"start": "2024-03-05"}, 3, 2, 1),
+            ({"semester_id": self.fall_2023.id}, 1, 1, 0),
+            ({"user_id": self.member.id}, 3, 2, 1),
+            ({"user_id": self.mentee.id}, 2, 1, 1),
+            ({"composer_id": self.mozart.id}, 2, 2, 0),
+            ({"conductor_id": self.karajan.id}, 2, 1, 1),
+            ({"player_id": self.cellist.id}, 2, 2, 0),
+        ]
+        for params, plays, sessions, requested in cases:
+            with self.subTest(params=params):
+                result = self.get("summary", **params)
+                self.assertEqual(result["total_plays"], plays)
+                self.assertEqual(result["sessions"], sessions)
+                self.assertEqual(result["requested"], requested)
+
+    def test_summary_counts_a_session_and_a_request_once_with_mentee_sessions(self):
+        # The 3/4 session has two members and two mentees, so the OR across both
+        # M2M joins returns each of its plays on more than one row.
+        TimeMusic.objects.filter(time__date=datetime.date(2024, 3, 4)).update(
+            is_requested=True
+        )
+        params = {"user_id": self.mentee.id, "include_mentees": "true"}
+        result = self.get("summary", **params)
+        self.assertEqual(result["total_plays"], 5)
+        self.assertEqual(result["sessions"], 3)
+        self.assertEqual(result["requested"], 2)
+
+        params["player_id"] = Player.objects.get(name="피아니스트").id
+        result = self.get("summary", **params)
+        self.assertEqual(result["total_plays"], 1)
+        self.assertEqual(result["sessions"], 1)
+        self.assertEqual(result["requested"], 1)
+
+    def test_a_session_without_plays_is_not_counted(self):
+        TimeInfo.objects.create(
+            date=datetime.date(2024, 3, 7), time=1, arrival_time="09:30:00"
+        )
+        self.assertEqual(self.get("summary")["sessions"], 4)
+
+    def test_summary_takes_two_queries(self):
+        params = {"user_id": self.mentee.id, "include_mentees": "true"}
+        for scope in ({}, params):
+            with self.subTest(params=scope):
+                with self.assertNumQueries(2):
+                    self.get("summary", **scope)
 
     def test_composers_are_ranked_by_plays_and_limited(self):
         result = self.get("composers")
@@ -657,6 +720,8 @@ class StatsTests(StatsRequests, APITestCase):
             {
                 "filters": {"scope": "all", "composer_id": self.mozart.id},
                 "total_plays": 2,
+                "sessions": 2,
+                "requested": 0,
                 "composers": 1,
                 "works": 1,
                 "conductors": 2,
