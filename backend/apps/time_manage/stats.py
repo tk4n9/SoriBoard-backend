@@ -441,24 +441,55 @@ class TopComposersStatsView(APIView):
 
 
 class TopWorksStatsView(APIView):
+    """많이 선곡된 곡. items 에 작곡가 id 와 첫·마지막 선곡일을 더한다.
+
+    first_played/last_played 는 필터와 상관없이 그 곡의 전체 선곡 중 첫·마지막
+    날짜다(기간을 좁혀도 "처음 튼 날"이 바뀌지 않는다).
+    """
+
     def get(self, request):
         qs, applied = base_queryset(request)
         total = qs.count()
         limit = _limit(request)
-        rows = (
+        rows = list(
             qs.exclude(music__isnull=True)
-            .values("music__id", "music__title", "music__composer__name")
+            .values(
+                "music__id",
+                "music__title",
+                "music__composer__id",
+                "music__composer__name",
+            )
             .annotate(count=Count("id", distinct=True))
             .order_by("-count")[:limit]
         )
+        dates = {}
+        if rows:
+            dates = {
+                span["music_id"]: span
+                for span in TimeMusic.objects.filter(
+                    music_id__in=[row["music__id"] for row in rows]
+                )
+                .values("music_id")
+                .annotate(first=Min("time__date"), last=Max("time__date"))
+            }
         labels, values, items = [], [], []
         for row in rows:
             composer = row["music__composer__name"] or ""
             title = row["music__title"]
             label = f"{composer} - {title}" if composer else title
+            played = dates[row["music__id"]]
             labels.append(label)
             values.append(row["count"])
-            items.append({"id": row["music__id"], "name": label, "count": row["count"]})
+            items.append(
+                {
+                    "id": row["music__id"],
+                    "name": label,
+                    "count": row["count"],
+                    "composer_id": row["music__composer__id"],
+                    "first_played": str(played["first"]),
+                    "last_played": str(played["last"]),
+                }
+            )
         return Response(
             {
                 "filters": applied,

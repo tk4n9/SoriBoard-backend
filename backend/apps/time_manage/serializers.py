@@ -2,7 +2,7 @@ from django.db import models, transaction
 from django.db.models import Prefetch
 from rest_framework import serializers
 from .models import *
-from .stats import StatsFilterSerializer
+from .stats import StatsFilterSerializer, era_for
 
 
 class BlankAsNullIntegerField(serializers.IntegerField):
@@ -51,10 +51,26 @@ class UserSerializer(serializers.ModelSerializer):
 
 class ComposerSerializer(serializers.ModelSerializer):
     num_time_music = serializers.IntegerField(read_only=True)
+    # The 시대 the stats count the composer in: era_override when it is one of
+    # ERA_ORDER, else from birth_year, else 미상.
+    era = serializers.SerializerMethodField()
 
     class Meta:
         model = Composer
-        fields = ["id", "name", "num_time_music"]
+        fields = ["id", "name", "num_time_music", "birth_year", "era_override", "era"]
+        read_only_fields = ["birth_year", "era_override"]
+
+    def get_era(self, obj):
+        return era_for(obj.birth_year, obj.era_override)
+
+
+class ComposerQuerySerializer(serializers.Serializer):
+    """Query of GET composers/: q (name contains) and limit. A blank value is
+    no filter."""
+
+    q = serializers.CharField(required=False, allow_blank=True)
+    # Past SQLite's 64-bit INTEGER the driver raises OverflowError (500).
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=2**63 - 1)
 
 
 class ComposerNameSerializer(serializers.ModelSerializer):

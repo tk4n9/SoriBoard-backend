@@ -61,7 +61,7 @@ class StatsRequests:
         self.assertIsNone(summary["date_start"])
         self.assertIsNone(summary["date_end"])
 
-        for name in ("composers", "eras", "genres"):
+        for name in ("composers", "works", "eras", "genres"):
             with self.subTest(endpoint=name):
                 result = self.get(name, **params)
                 self.assertEqual(result["total_plays"], 0)
@@ -352,7 +352,14 @@ class StatsTests(StatsRequests, APITestCase):
         self.assertEqual(works["total_plays"], 6)
         self.assertEqual(
             works["items"][0],
-            {"id": self.symphony.id, "name": "모차르트 - 교향곡 제40번", "count": 2},
+            {
+                "id": self.symphony.id,
+                "name": "모차르트 - 교향곡 제40번",
+                "count": 2,
+                "composer_id": self.mozart.id,
+                "first_played": "2024-03-04",
+                "last_played": "2024-03-06",
+            },
         )
         self.assertEqual(
             self.counts(works),
@@ -381,6 +388,58 @@ class StatsTests(StatsRequests, APITestCase):
         self.assertEqual(
             self.counts(self.get("orchestras", **later)), {"빈 필하모닉": 1}
         )
+
+    def test_works_name_their_composer(self):
+        composer_ids = {
+            item["name"]: item["composer_id"] for item in self.get("works")["items"]
+        }
+        self.assertEqual(
+            composer_ids,
+            {
+                f"{music.composer.name} - {music.title}": music.composer_id
+                for music in Music.objects.select_related("composer")
+            },
+        )
+
+    def test_works_first_and_last_played_are_all_time_not_the_filtered_range(self):
+        self.add_play(datetime.date(2025, 5, 2), music=self.symphony)
+        dates = {"first_played": "2024-03-04", "last_played": "2025-05-02"}
+        # Each range holds one of the symphony's three plays.
+        for params in [
+            {"end": "2024-03-04"},
+            {"start": "2024-03-05", "end": "2024-03-06"},
+            {"start": "2025-01-01"},
+            {"semester_id": self.spring_2024.id, "user_id": self.member.id},
+        ]:
+            with self.subTest(params=params):
+                items = self.get("works", **params)["items"]
+                item = next(i for i in items if i["id"] == self.symphony.id)
+                self.assertEqual(item["count"], 1)
+                self.assertEqual(
+                    {k: item[k] for k in ("first_played", "last_played")}, dates
+                )
+
+    def test_a_work_played_once_was_first_and_last_played_that_day(self):
+        suite = self.get("works", player_id=self.cellist.id, end="2024-03-01")
+        self.assertEqual(
+            suite["items"][0],
+            {
+                "id": Music.objects.get(title="무반주 첼로 모음곡 제1번").id,
+                "name": "바흐 - 무반주 첼로 모음곡 제1번",
+                "count": 1,
+                "composer_id": Composer.objects.get(name="바흐").id,
+                "first_played": "2024-02-29",
+                "last_played": "2024-02-29",
+            },
+        )
+
+    def test_works_take_three_queries_and_two_when_empty(self):
+        # The total, the ranking, and the first and last play of the ranked works.
+        for params in [{}, {"user_id": self.mentee.id, "include_mentees": "true"}]:
+            with self.subTest(params=params), self.assertNumQueries(3):
+                self.get("works", **params)
+        with self.assertNumQueries(2):
+            self.assertEqual(self.get("works", start="2030-01-01")["items"], [])
 
     def test_eras_use_birth_year_override_and_report_unknown_share(self):
         result = self.get("eras")

@@ -377,12 +377,27 @@ class SwapOrderView(APIView):
 
 
 class ComposerViewSet(SQLiteIdMixin, viewsets.ReadOnlyModelViewSet):
+    """Composers, most played first. The list takes ?q= (name contains) and
+    ?limit= (the first n); without them it lists every composer."""
+
     serializer_class = ComposerSerializer
 
     def get_queryset(self):
-        return Composer.objects.annotate(
+        composers = Composer.objects.annotate(
             num_time_music=Count("musics__timemusic")
         ).order_by("-num_time_music")
+        if self.action != "list":
+            return composers
+
+        query = ComposerQuerySerializer(data=self.request.query_params)
+        query.is_valid(raise_exception=True)
+        q = query.validated_data.get("q", "").strip()
+        if q:
+            composers = composers.filter(name__icontains=q)
+        limit = query.validated_data.get("limit")
+        if limit is not None:
+            composers = composers[:limit]
+        return composers
 
 
 class MusicViewSet(SQLiteIdMixin, viewsets.ReadOnlyModelViewSet):
