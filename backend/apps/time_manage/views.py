@@ -379,9 +379,10 @@ class SwapOrderView(APIView):
 class ComposerViewSet(
     SQLiteIdMixin, mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet
 ):
-    """Composers, most played first. The list takes ?q= (name contains) and
-    ?limit= (the first n); without them it lists every composer. PATCH
-    corrects one composer's birth_year and era_override; there is no PUT."""
+    """Composers, most played first (ties by name, then id). The list takes
+    ?q= (name contains) and ?limit= (the first n); without them it lists
+    every composer. PATCH corrects one composer's birth_year and era_override;
+    there is no PUT."""
 
     serializer_class = ComposerSerializer
     http_method_names = ["get", "patch", "head", "options"]
@@ -389,7 +390,7 @@ class ComposerViewSet(
     def get_queryset(self):
         composers = Composer.objects.annotate(
             num_time_music=Count("musics__timemusic")
-        ).order_by("-num_time_music")
+        ).order_by("-num_time_music", "name", "id")
         if self.action != "list":
             return composers
 

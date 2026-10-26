@@ -119,6 +119,28 @@ class MusicCatalogTests(APITestCase):
         self.assertEqual(self.get_composers(limit=1), [self.beethoven.name])
         self.assertEqual(len(self.get_composers(limit=100)), 3)
 
+    def test_composers_with_as_many_plays_are_listed_by_name_then_id(self):
+        # Created after 쇼팽, so not in id order.
+        haydn = Composer.objects.create(name="하이든")
+        gabrieli = Composer.objects.create(name="가브리엘리")
+        twin = Composer.objects.create(name="가브리엘리")
+        response = self.client.get(reverse("composerlist-list"))
+        self.assertEqual(
+            [composer["id"] for composer in response.json()],
+            [
+                self.beethoven.id,
+                self.brahms.id,
+                gabrieli.id,
+                twin.id,
+                self.chopin.id,
+                haydn.id,
+            ],
+        )
+        self.assertEqual(
+            self.get_composers(limit=3),
+            [self.beethoven.name, self.brahms.name, gabrieli.name],
+        )
+
     def test_q_and_limit_combine(self):
         ockeghem = Composer.objects.create(name="요하네스 오케겜")
         self.assertEqual(

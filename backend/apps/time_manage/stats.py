@@ -24,8 +24,20 @@ import datetime
 import math
 from collections import defaultdict
 
-from django.db.models import Count, Max, Min, OuterRef, Q, Subquery
-from django.db.models.functions import TruncMonth, TruncWeek
+from django.db.models import (
+    Case,
+    CharField,
+    Count,
+    F,
+    Max,
+    Min,
+    OuterRef,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
+from django.db.models.functions import Concat, TruncMonth, TruncWeek
 from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -368,13 +380,29 @@ def _limit(request, default=15):
         return default
 
 
+def _label(blank, alone, *parts):
+    """응답에 보이는 이름(라벨)과 같은 문자열의 SQL 식. 동점 정렬용.
+
+    blank 필드가 비면 alone 필드만, 아니면 parts(필드 이름 또는 Value)를 잇는다.
+    SQLite 는 문자열을 코드 포인트 순으로 비교하므로 파이썬의 정렬과 같다.
+    """
+    return Case(
+        When(**{blank: ""}, then=F(alone)),
+        default=Concat(*parts),
+        output_field=CharField(),
+    )
+
+
 def _top_by(qs, group_field, name_field, limit, id_field=None):
-    """공통 top-N 집계. labels/values/items 봉투 부분을 만든다."""
+    """공통 top-N 집계. labels/values/items 봉투 부분을 만든다.
+
+    선곡 수가 같으면 이름, 그다음 id 순(limit 의 경계도 이 순서를 따른다).
+    """
     id_field = id_field or group_field
     rows = (
         qs.values(id_field, name_field)
         .annotate(count=Count("id", distinct=True))
-        .order_by("-count")[:limit]
+        .order_by("-count", name_field, id_field)[:limit]
     )
     labels, values, items = [], [], []
     for row in rows:
@@ -448,7 +476,8 @@ class TopWorksStatsView(APIView):
     """많이 선곡된 곡. items 에 작곡가 id 와 첫·마지막 선곡일을 더한다.
 
     first_played/last_played 는 필터와 상관없이 그 곡의 전체 선곡 중 첫·마지막
-    날짜다(기간을 좁혀도 "처음 튼 날"이 바뀌지 않는다).
+    날짜다(기간을 좁혀도 "처음 튼 날"이 바뀌지 않는다). 선곡 수가 같으면
+    라벨("작곡가 - 곡"), 그다음 id 순.
     """
 
     def get(self, request):
@@ -464,7 +493,17 @@ class TopWorksStatsView(APIView):
                 "music__composer__name",
             )
             .annotate(count=Count("id", distinct=True))
-            .order_by("-count")[:limit]
+            .order_by(
+                "-count",
+                _label(
+                    "music__composer__name",
+                    "music__title",
+                    "music__composer__name",
+                    Value(" - "),
+                    "music__title",
+                ),
+                "music__id",
+            )[:limit]
         )
         dates = {}
         if rows:
@@ -552,7 +591,7 @@ class TopSoloistsStatsView(APIView):
 
     악기에 상관없이 모든 연주자를 한데 모아 등장 선곡 수로 순위를 매긴다.
     라벨은 "이름 (악기)" 형태. M2M 조인으로 한 곡이 부풀지 않도록 곡은
-    distinct 로 센다.
+    distinct 로 센다. 선곡 수가 같으면 라벨, 그다음 id 순.
     """
 
     def get(self, request):
@@ -562,7 +601,18 @@ class TopSoloistsStatsView(APIView):
             qs.exclude(players__isnull=True)
             .values("players__id", "players__name", "players__instrument")
             .annotate(count=Count("id", distinct=True))
-            .order_by("-count")[: _limit(request)]
+            .order_by(
+                "-count",
+                _label(
+                    "players__instrument",
+                    "players__name",
+                    "players__name",
+                    Value(" ("),
+                    "players__instrument",
+                    Value(")"),
+                ),
+                "players__id",
+            )[: _limit(request)]
         )
         labels, values, items = [], [], []
         for row in rows:

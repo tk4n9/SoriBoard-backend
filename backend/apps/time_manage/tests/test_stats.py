@@ -406,6 +406,140 @@ class StatsTests(StatsRequests, APITestCase):
             self.counts(self.get("orchestras", **later)), {"빈 필하모닉": 1}
         )
 
+    RANKINGS = ["composers", "works", "soloists", "conductors", "orchestras"]
+
+    def ranked(self, name, **params):
+        result = self.get(name, **params)
+        items = result["items"]
+        self.assertEqual(
+            items,
+            sorted(items, key=lambda item: (-item["count"], item["name"], item["id"])),
+        )
+        return [item["name"] for item in items]
+
+    def test_ties_are_ranked_by_name(self):
+        # Created 바흐, 브람스, 베토벤, 작자 미상: ties are not in id order.
+        self.assertEqual(
+            self.ranked("composers"),
+            ["모차르트", "바흐", "베토벤", "브람스", "작자 미상"],
+        )
+        self.assertEqual(
+            self.ranked("works"),
+            [
+                "모차르트 - 교향곡 제40번",
+                "바흐 - 무반주 첼로 모음곡 제1번",
+                "베토벤 - 현악 사중주 제14번",
+                "브람스 - 피아노 협주곡 제2번",
+                "작자 미상 - 그레고리오 성가",
+            ],
+        )
+        self.assertEqual(
+            self.ranked("soloists"),
+            [
+                "첼리스트 (첼로)",
+                "비올리스트 (비올라)",
+                "제1바이올린 (바이올린)",
+                "제2바이올린 (바이올린)",
+                "피아니스트 (피아노)",
+            ],
+        )
+        for name in self.RANKINGS:
+            with self.subTest(endpoint=name):
+                self.ranked(name, start="2024-03-01")
+
+    def test_ties_with_the_same_name_are_ranked_by_id_and_limit_cuts_after(self):
+        chung = Conductor.objects.create(name="정명훈")
+        abbado = Conductor.objects.create(name="아바도")
+        twin = Conductor.objects.create(name="아바도")
+        cologne = Orchestra.objects.create(name="쾰른 방송 교향악단")
+        london = Orchestra.objects.create(name="런던 심포니")
+        london_twin = Orchestra.objects.create(name="런던 심포니")
+        for conductor, orchestra in (
+            (chung, cologne),
+            (twin, london_twin),
+            (abbado, london),
+        ):
+            self.add_play(
+                datetime.date(2025, 1, 6),
+                time=conductor.id,
+                music=self.symphony,
+                conductor=conductor,
+                orchestra=orchestra,
+            )
+
+        later = {"start": "2025-01-01"}
+        conductors = self.get("conductors", **later)
+        self.assertEqual(
+            [item["id"] for item in conductors["items"]], [abbado.id, twin.id, chung.id]
+        )
+        self.assertEqual(conductors["labels"], ["아바도", "아바도", "정명훈"])
+        orchestras = self.get("orchestras", **later)
+        self.assertEqual(
+            [item["id"] for item in orchestras["items"]],
+            [london.id, london_twin.id, cologne.id],
+        )
+        for name, first_two in (
+            ("conductors", [abbado.id, twin.id]),
+            ("orchestras", [london.id, london_twin.id]),
+        ):
+            with self.subTest(endpoint=name):
+                top = self.get(name, limit=2, **later)
+                self.assertEqual([item["id"] for item in top["items"]], first_two)
+        # 카라얀 (2) still leads; the tied ones follow by name.
+        self.assertEqual(
+            self.get("conductors", limit=3)["labels"], ["카라얀", "번스타인", "아바도"]
+        )
+        for name in self.RANKINGS:
+            with self.subTest(endpoint=name):
+                self.ranked(name)
+
+    def test_ties_are_ranked_by_the_name_the_answer_shows(self):
+        # By label, not by its parts: "슈트라우스 (요한) - …" sorts before
+        # "슈트라우스 - …" ("(" < "-"), and a work whose composer has no name
+        # is labelled with its title alone.
+        strauss = Composer.objects.create(name="슈트라우스")
+        johann = Composer.objects.create(name="슈트라우스 (요한)")
+        unnamed = Composer.objects.create(name="")
+        waltz = Music.objects.create(composer=strauss, title="왈츠")
+        march = Music.objects.create(composer=johann, title="라데츠키 행진곡")
+        hymn = Music.objects.create(composer=unnamed, title="슈트라우스 송가")
+        # "합창단" < "합창단 & 독창자" < "합창단 (합창)" ("&" < "(").
+        choir = Player.objects.create(name="합창단", instrument="합창")
+        duo = Player.objects.create(name="합창단 & 독창자", instrument="")
+        bare = Player.objects.create(name="합창단", instrument="")
+        for time, music in enumerate((waltz, march, hymn), start=1):
+            self.add_play(
+                datetime.date(2025, 1, 6),
+                time=time,
+                music=music,
+                players=[choir, duo, bare],
+            )
+
+        later = {"start": "2025-01-01"}
+        self.assertEqual(
+            self.ranked("works", **later),
+            [
+                "슈트라우스 (요한) - 라데츠키 행진곡",
+                "슈트라우스 - 왈츠",
+                "슈트라우스 송가",
+            ],
+        )
+        self.assertEqual(
+            [item["id"] for item in self.get("works", **later)["items"]],
+            [march.id, waltz.id, hymn.id],
+        )
+        self.assertEqual(
+            self.ranked("soloists", **later),
+            ["합창단", "합창단 & 독창자", "합창단 (합창)"],
+        )
+        self.assertEqual(
+            [item["id"] for item in self.get("soloists", **later)["items"]],
+            [bare.id, duo.id, choir.id],
+        )
+        self.assertEqual(
+            self.ranked("composers", **later), ["", "슈트라우스", "슈트라우스 (요한)"]
+        )
+
     def test_works_name_their_composer(self):
         composer_ids = {
             item["name"]: item["composer_id"] for item in self.get("works")["items"]
